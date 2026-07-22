@@ -1,0 +1,32 @@
+{
+  "runs_cold": 5,
+  "runs_warm": 5,
+  "prompt": "Reply with the single word: pong",
+  "max_tokens": 16,
+  "gateways": [
+    {
+      "name": "vercel",
+      "host": "ai-gateway.vercel.sh",
+      "path": "/v1/chat/completions",
+      "model": "anthropic/claude-haiku-4.5",
+      "auth_value": "Bearer $AI_GATEWAY_API_KEY"
+    },
+    {
+      "name": "openrouter",
+      "host": "openrouter.ai",
+      "path": "/api/v1/chat/completions",
+      "model": "anthropic/claude-haiku-4.5",
+      "auth_value": "Bearer $OPENROUTER_API_KEY"
+    },
+    {
+      "name": "cloudflare",
+      "host": "gateway.ai.cloudflare.com",
+      "path": "/v1/<ACCOUNT_ID>/<GATEWAY_ID>/openrouter/v1/chat/completions",
+      "model": "anthropic/claude-haiku-4.5",
+      "auth_value": "Bearer $OPENROUTER_API_KEY",
+      "extra_headers": {
+        "cf-aig-authorization": "Bearer $CLOUDFLARE_AI_GATEWAY_API_KEY"
+      }
+    }
+  ]
+}

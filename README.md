@@ -1,4 +1,17 @@
 # ai-gateways-benchmark
+> Imagine you want to measure how fast a courier delivers packages. In your
+test, the courier does not deliver directly. He hands the package to a
+second courier, who runs the rest of the route. The time you record is
+both couriers combined. If you publish that number as the first courier's
+speed, you are blaming him for a route he never ran.
+
+> That is what a chained configuration does: a gateway proxying another
+gateway measures the whole chain, not the outer gateway's own overhead.
+Time each courier delivering directly before you compare them. When you
+publish a chained number, label it as the chain it is.
+
+
+### what is this?
 
 Phase-by-phase latency benchmark for AI gateways, measured from your own
 machine. Raw sockets, zero dependencies — Python 3 stdlib only.

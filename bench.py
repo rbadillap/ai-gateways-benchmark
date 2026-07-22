@@ -33,7 +33,13 @@ import time
 TIMEOUT = 20
 CONTENT_RE = re.compile(rb'"(?:content|text)"\s*:\s*"[^"]')
 END_MARKERS = (b"data: [DONE]", b'"type":"message_stop"', b"\r\n0\r\n\r\n")
-RECEIPT_HEADERS = ("x-vercel-id", "cf-ray", "x-request-id", "request-id", "x-amzn-requestid")
+RECEIPT_HEADERS = (
+    "x-vercel-id",
+    "cf-ray",
+    "x-request-id",
+    "request-id",
+    "x-amzn-requestid",
+)
 
 now = time.perf_counter
 
@@ -57,12 +63,14 @@ def open_conn(ip, host):
 
 
 def build_request(gw, cfg):
-    body = json.dumps({
-        "model": gw["model"],
-        "messages": [{"role": "user", "content": cfg["prompt"]}],
-        "max_tokens": cfg["max_tokens"],
-        "stream": True,
-    }).encode()
+    body = json.dumps(
+        {
+            "model": gw["model"],
+            "messages": [{"role": "user", "content": cfg["prompt"]}],
+            "max_tokens": cfg["max_tokens"],
+            "stream": True,
+        }
+    ).encode()
     headers = {
         "Host": gw["host"],
         gw.get("auth_header", "Authorization"): os.path.expandvars(gw["auth_value"]),
@@ -74,8 +82,12 @@ def build_request(gw, cfg):
     }
     for k, v in gw.get("extra_headers", {}).items():
         headers[k] = os.path.expandvars(v)
-    head = f"POST {gw['path']} HTTP/1.1\r\n" + "".join(
-        f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
+    path = os.path.expandvars(gw["path"])
+    head = (
+        f"POST {path} HTTP/1.1\r\n"
+        + "".join(f"{k}: {v}\r\n" for k, v in headers.items())
+        + "\r\n"
+    )
     return head.encode() + body
 
 
@@ -110,11 +122,20 @@ def timed_request(sock, request):
                         resp_headers[k.strip().lower()] = v.strip()
         if ttft is None and header_end >= 0 and CONTENT_RE.search(buf, header_end):
             ttft = (now() - t0) * 1000
-        if status is not None and status != 200 and header_end >= 0 and len(buf) > header_end + 4:
+        if (
+            status is not None
+            and status != 200
+            and header_end >= 0
+            and len(buf) > header_end + 4
+        ):
             break  # error body arrived; no stream to wait for
         if any(m in buf for m in END_MARKERS):
             break
-    body_preview = buf[header_end + 4:header_end + 300].decode("utf8", "replace") if header_end >= 0 else ""
+    body_preview = (
+        buf[header_end + 4 : header_end + 300].decode("utf8", "replace")
+        if header_end >= 0
+        else ""
+    )
     return status, resp_headers, ttfb, ttft, body_preview
 
 
@@ -122,14 +143,20 @@ def run_cold(gw, cfg):
     ip, dns_ms = resolve(gw["host"])
     sock, tcp_ms, tls_ms = open_conn(ip, gw["host"])
     try:
-        status, headers, ttfb, ttft, preview = timed_request(sock, build_request(gw, cfg))
+        status, headers, ttfb, ttft, preview = timed_request(
+            sock, build_request(gw, cfg)
+        )
     finally:
         sock.close()
     if status != 200 or ttft is None:
         raise RuntimeError(f"HTTP {status}: {preview[:200]}")
     return {
-        "ip": ip, "dns": dns_ms, "tcp": tcp_ms, "tls": tls_ms,
-        "ttfb": ttfb, "ttft": ttft,
+        "ip": ip,
+        "dns": dns_ms,
+        "tcp": tcp_ms,
+        "tls": tls_ms,
+        "ttfb": ttfb,
+        "ttft": ttft,
         "e2e": dns_ms + tcp_ms + tls_ms + ttft,
         "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers},
     }
@@ -160,9 +187,12 @@ def run_warm(gw, cfg):
         sock.close()
     if status != 200 or ttft is None:
         raise RuntimeError(f"HTTP {status}: {preview[:200]}")
-    return {"ttfb": ttfb, "ttft": ttft,
-            "conn": {h: headers[h] for h in ("connection", "keep-alive") if h in headers},
-            "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers}}
+    return {
+        "ttfb": ttfb,
+        "ttft": ttft,
+        "conn": {h: headers[h] for h in ("connection", "keep-alive") if h in headers},
+        "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers},
+    }
 
 
 def med(runs, key):
@@ -184,36 +214,50 @@ def main():
             try:
                 r = run_cold(gw, cfg)
                 results[gw["name"]]["cold"].append(r)
-                print(f"cold {i+1} {gw['name']:<12} tls={r['tls']:6.1f}ms ttft={r['ttft']:7.1f}ms e2e={r['e2e']:7.1f}ms")
+                print(
+                    f"cold {i + 1} {gw['name']:<12} tls={r['tls']:6.1f}ms ttft={r['ttft']:7.1f}ms e2e={r['e2e']:7.1f}ms"
+                )
             except Exception as e:
-                results[gw["name"]]["errors"].append(f"cold {i+1}: {e}")
-                print(f"cold {i+1} {gw['name']:<12} ERROR: {e}")
+                results[gw["name"]]["errors"].append(f"cold {i + 1}: {e}")
+                print(f"cold {i + 1} {gw['name']:<12} ERROR: {e}")
 
     for i in range(cfg.get("runs_warm", 5)):
         for gw in gateways:
             try:
                 r = run_warm(gw, cfg)
                 results[gw["name"]]["warm"].append(r)
-                print(f"warm {i+1} {gw['name']:<12} ttfb={r['ttfb']:7.1f}ms ttft={r['ttft']:7.1f}ms")
+                print(
+                    f"warm {i + 1} {gw['name']:<12} ttfb={r['ttfb']:7.1f}ms ttft={r['ttft']:7.1f}ms"
+                )
             except Exception as e:
-                results[gw["name"]]["errors"].append(f"warm {i+1}: {e}")
-                print(f"warm {i+1} {gw['name']:<12} ERROR: {e}")
+                results[gw["name"]]["errors"].append(f"warm {i + 1}: {e}")
+                print(f"warm {i + 1} {gw['name']:<12} ERROR: {e}")
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    out = os.path.join(os.path.dirname(os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "config.json")),
-                       f"results-{stamp}.json")
+    out = os.path.join(
+        os.path.dirname(
+            os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "config.json")
+        ),
+        f"results-{stamp}.json",
+    )
     with open(out, "w") as f:
         json.dump(results, f, indent=2)
 
-    print(f"\nMedians in ms, {cfg.get('runs_cold', 5)} cold + {cfg.get('runs_warm', 5)} warm runs, "
-          f"model per gateway as configured, max_tokens={cfg['max_tokens']}\n")
-    print("| Gateway | DNS | TCP | TLS | TTFB | TTFT | Cold e2e TTFT | Warm TTFB | Warm TTFT |")
+    print(
+        f"\nMedians in ms, {cfg.get('runs_cold', 5)} cold + {cfg.get('runs_warm', 5)} warm runs, "
+        f"model per gateway as configured, max_tokens={cfg['max_tokens']}\n"
+    )
+    print(
+        "| Gateway | DNS | TCP | TLS | TTFB | TTFT | Cold e2e TTFT | Warm TTFB | Warm TTFT |"
+    )
     print("|---|---|---|---|---|---|---|---|---|")
     for gw in gateways:
         c, w = results[gw["name"]]["cold"], results[gw["name"]]["warm"]
-        print(f"| {gw['name']} |{fmt(med(c,'dns'))} |{fmt(med(c,'tcp'))} |{fmt(med(c,'tls'))} "
-              f"|{fmt(med(c,'ttfb'))} |{fmt(med(c,'ttft'))} |{fmt(med(c,'e2e'))} "
-              f"|{fmt(med(w,'ttfb'))} |{fmt(med(w,'ttft'))} |")
+        print(
+            f"| {gw['name']} |{fmt(med(c, 'dns'))} |{fmt(med(c, 'tcp'))} |{fmt(med(c, 'tls'))} "
+            f"|{fmt(med(c, 'ttfb'))} |{fmt(med(c, 'ttft'))} |{fmt(med(c, 'e2e'))} "
+            f"|{fmt(med(w, 'ttfb'))} |{fmt(med(w, 'ttft'))} |"
+        )
     print("\nReceipts (one per gateway):")
     for gw in gateways:
         runs = results[gw["name"]]["cold"]

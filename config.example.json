@@ -5,6 +5,17 @@
   "max_tokens": 16,
   "gateways": [
     {
+      "name": "anthropic-direct",
+      "host": "api.anthropic.com",
+      "path": "/v1/messages",
+      "model": "claude-haiku-4-5",
+      "auth_header": "x-api-key",
+      "auth_value": "$ANTHROPIC_API_KEY",
+      "extra_headers": {
+        "anthropic-version": "2023-06-01"
+      }
+    },
+    {
       "name": "vercel",
       "host": "ai-gateway.vercel.sh",
       "path": "/v1/chat/completions",
@@ -19,7 +30,19 @@
       "auth_value": "Bearer $OPENROUTER_API_KEY"
     },
     {
-      "name": "cloudflare",
+      "name": "cloudflare-anthropic",
+      "host": "gateway.ai.cloudflare.com",
+      "path": "/v1/<ACCOUNT_ID>/<GATEWAY_ID>/anthropic/v1/messages",
+      "model": "claude-haiku-4-5",
+      "auth_header": "x-api-key",
+      "auth_value": "$ANTHROPIC_API_KEY",
+      "extra_headers": {
+        "anthropic-version": "2023-06-01",
+        "cf-aig-authorization": "Bearer $CLOUDFLARE_AI_GATEWAY_API_KEY"
+      }
+    },
+    {
+      "name": "cloudflare-openrouter",
       "host": "gateway.ai.cloudflare.com",
       "path": "/v1/<ACCOUNT_ID>/<GATEWAY_ID>/openrouter/v1/chat/completions",
       "model": "anthropic/claude-haiku-4.5",

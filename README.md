@@ -27,6 +27,23 @@ differently. This tool separates them:
 - Runs interleave round-robin across gateways to cancel time-of-day drift.
 - Request-id headers (`x-vercel-id`, `cf-ray`, …) are captured as receipts.
 
+## Baselines and topology
+
+Two practices keep results honest:
+
+- **Include a provider-direct row** (no gateway at all) whenever you can —
+  the example config ships one. With a baseline in the table, every
+  gateway's numbers can be read as *overhead relative to going direct*,
+  which removes vendor-vs-vendor framing entirely: each gateway competes
+  against the network, not against the row below it.
+- **Name configs after their full path.** A gateway proxying another
+  gateway (`cloudflare-openrouter`) is a different topology than the same
+  gateway fronting a provider directly (`cloudflare-anthropic`), and the
+  results table should say which one was measured. A chained config
+  measures the whole chain — never present it as the outer gateway's own
+  overhead. Prefer each gateway's shortest production configuration; add
+  chained rows only deliberately, clearly labeled.
+
 ## Setup
 
 ```sh

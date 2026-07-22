@@ -27,6 +27,7 @@ request time, so no secret has to sit in the config file.
 | `ANTHROPIC_API_KEY` | `anthropic`, `cloudflare-anthropic` |
 | `AI_GATEWAY_API_KEY` | `vercel` |
 | `OPENROUTER_API_KEY` | `openrouter` |
+| `GRANT_API_KEY` | `grant` |
 | `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` | `cloudflare`, `cloudflare-anthropic` |
 
 Drop any gateway from `config.json` whose keys you don't have.
@@ -91,6 +92,12 @@ shapes: `cloudflare` uses the OpenAI-compatible `compat` endpoint, which
 requires provider keys stored in the gateway (BYOK), while
 `cloudflare-anthropic` passes the provider key per request instead, so it
 works without stored keys.
+
+Use `config.grant-openrouter.example.json` for a smaller Grant and OpenRouter
+comparison. It uses
+`anthropic/claude-haiku-4.5`. Set `GRANT_API_KEY` to a Grant API key for an
+account with the LLM router enabled. That account must also have an Anthropic
+BYOK key so Grant can send the request to the same model provider.
 
 ## Read this before publishing numbers
 

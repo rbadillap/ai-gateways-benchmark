@@ -1,7 +1,10 @@
 # ai-gateways-benchmark
 
-Phase-by-phase latency benchmark for AI gateways, measured from your own
-machine. Raw sockets, zero dependencies, Python 3 stdlib only.
+<img width="1280" height="640" alt="GitHub social preview · 1280×640" src="https://github.com/user-attachments/assets/b755e579-ab00-433e-bb93-9d94f5f198c1" />
+
+<br />
+<p align="center">Phase-by-phase latency benchmark for AI gateways, measured from your own
+machine. Raw sockets, zero dependencies, Python 3 stdlib only.</p>
 
 ## Quickstart
 

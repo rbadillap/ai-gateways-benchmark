@@ -156,9 +156,15 @@ def run_warm(gw, cfg):
         if status != 200:
             raise RuntimeError(f"warmup HTTP {status}: {preview[:200]}")
         _drain(sock)
-        status, headers, ttfb, ttft, preview = timed_request(sock, request)
+        try:
+            status, headers, ttfb, ttft, preview = timed_request(sock, request)
+        except (BrokenPipeError, ConnectionResetError) as e:
+            raise RuntimeError(
+                f"server closed reused connection ({type(e).__name__})") from e
     finally:
         sock.close()
+    if ttfb is None:
+        raise RuntimeError("server closed reused connection (no bytes on second request)")
     if status != 200 or ttft is None:
         raise RuntimeError(f"HTTP {status}: {preview[:200]}")
     return {"ttfb": ttfb, "ttft": ttft,
@@ -178,6 +184,7 @@ def fmt(v):
 def main():
     cfg = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "config.json"))
     gateways = cfg["gateways"]
+    width = max(len(gw["name"]) for gw in gateways)
     results = {gw["name"]: {"cold": [], "warm": [], "errors": []} for gw in gateways}
 
     for i in range(cfg.get("runs_cold", 5)):
@@ -185,20 +192,20 @@ def main():
             try:
                 r = run_cold(gw, cfg)
                 results[gw["name"]]["cold"].append(r)
-                print(f"cold {i+1} {gw['name']:<12} tls={r['tls']:6.1f}ms ttft={r['ttft']:7.1f}ms e2e={r['e2e']:7.1f}ms")
+                print(f"cold {i+1} {gw['name']:<{width}} tls={r['tls']:6.1f}ms ttft={r['ttft']:7.1f}ms e2e={r['e2e']:7.1f}ms")
             except Exception as e:
                 results[gw["name"]]["errors"].append(f"cold {i+1}: {e}")
-                print(f"cold {i+1} {gw['name']:<12} ERROR: {e}")
+                print(f"cold {i+1} {gw['name']:<{width}} ERROR: {e}")
 
     for i in range(cfg.get("runs_warm", 5)):
         for gw in gateways:
             try:
                 r = run_warm(gw, cfg)
                 results[gw["name"]]["warm"].append(r)
-                print(f"warm {i+1} {gw['name']:<12} ttfb={r['ttfb']:7.1f}ms ttft={r['ttft']:7.1f}ms")
+                print(f"warm {i+1} {gw['name']:<{width}} ttfb={r['ttfb']:7.1f}ms ttft={r['ttft']:7.1f}ms")
             except Exception as e:
                 results[gw["name"]]["errors"].append(f"warm {i+1}: {e}")
-                print(f"warm {i+1} {gw['name']:<12} ERROR: {e}")
+                print(f"warm {i+1} {gw['name']:<{width}} ERROR: {e}")
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = os.path.join(os.path.dirname(os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "config.json")),

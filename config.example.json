@@ -1,11 +1,11 @@
 {
-  "runs_cold": 5,
-  "runs_warm": 5,
+  "runs_cold": 50,
+  "runs_warm": 50,
   "prompt": "Reply with the single word: pong",
   "max_tokens": 16,
   "gateways": [
     {
-      "name": "anthropic-direct",
+      "name": "anthropic",
       "host": "api.anthropic.com",
       "path": "/v1/messages",
       "model": "claude-haiku-4-5",

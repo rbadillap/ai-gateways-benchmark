@@ -12,8 +12,32 @@ set -a; source .env; set +a
 python3 bench.py config.json
 ```
 
-It prints per-run lines while it works, then a medians table ready to
-paste, receipt headers per gateway, and dumps raw per-run results to
+### Setup
+
+Each gateway is called with real credentials, so you need an API key for every
+gateway in your `config.json` (Cloudflare also wants account and gateway IDs).
+Fill them into `.env`. `bench.py` reads the `$VARS` from the environment at
+request time, so no secret has to sit in the config file.
+
+| Variable | Used by |
+|---|---|
+| `ANTHROPIC_API_KEY` | `anthropic`, `cloudflare-anthropic` |
+| `AI_GATEWAY_API_KEY` | `vercel` |
+| `OPENROUTER_API_KEY` | `openrouter` |
+| `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` | `cloudflare`, `cloudflare-anthropic` |
+
+Drop any gateway from `config.json` whose keys you don't have.
+
+> [!WARNING]
+> The example runs 50 cold and 50 warm measurements against every gateway:
+> hundreds of billable API calls and a few minutes of wall time. For a quick
+> local check, drop `runs_cold` and `runs_warm` in `config.json` to something
+> small like 5. 50 is just a sample size we picked for a steadier p90, not a
+> magic number; with a few runs the p90 rides on your single slowest request,
+> and past 50 or so the extra runs barely move it.
+
+It prints per-run lines while it works, then a p50 table ready to paste,
+receipt headers per gateway, and dumps raw per-run results to
 `results-<timestamp>.json`:
 
 ```
@@ -75,8 +99,16 @@ works without stored keys.
 - `cold` means a new connection, not a provider-side cold start.
 - A config that proxies one gateway through another measures the whole
   chain, never the outer gateway alone.
-- Medians of small runs are indicative, not definitive. The raw JSON has
-  the spread.
+- Each metric reports p50, p90, and IQR (R-7 percentiles) over `n` successful
+  runs. A small `n` still means a noisy p90, so check `n` and the raw JSON for
+  the full spread.
+- Summary statistics include successful runs only. Inspect and disclose the
+  error count; a row with failed attempts is not comparable without that
+  context.
+- A gateway that dynamically selects an upstream measures that routing
+  policy, not isolated gateway overhead.
+- Keep the config and benchmark commit with the raw JSON. The current result
+  file does not contain enough context to reproduce a run by itself.
 
 The full measurement doctrine, including baselines, topology naming, and
 how to present results honestly: **[METHODOLOGY.md](METHODOLOGY.md)**.

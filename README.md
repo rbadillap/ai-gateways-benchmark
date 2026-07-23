@@ -27,7 +27,7 @@ paste, receipt headers per gateway, and dumps raw per-run results to
 ## What it measures
 
 ```mermaid
-flowchart LR
+flowchart TB
     subgraph setup [connection setup, paid on every cold start]
         DNS --> TCP --> TLS
     end

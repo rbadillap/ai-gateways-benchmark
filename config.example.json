@@ -8,7 +8,13 @@
       "name": "anthropic",
       "host": "api.anthropic.com",
       "path": "/v1/messages",
-      "model": "claude-haiku-4-5",
+      "model": "claude-haiku-4-5-20251001",
+      "routing": {
+        "mode": "direct",
+        "provider": "anthropic",
+        "region": null,
+        "fallbacks": false
+      },
       "auth_header": "x-api-key",
       "auth_value": "$ANTHROPIC_API_KEY",
       "extra_headers": {
@@ -20,20 +26,49 @@
       "host": "ai-gateway.vercel.sh",
       "path": "/v1/chat/completions",
       "model": "anthropic/claude-haiku-4.5",
-      "auth_value": "Bearer $AI_GATEWAY_API_KEY"
+      "routing": {
+        "mode": "pinned",
+        "provider": "anthropic",
+        "region": null,
+        "fallbacks": false
+      },
+      "auth_value": "Bearer $AI_GATEWAY_API_KEY",
+      "extra_body": {
+        "provider": {
+          "only": ["anthropic"]
+        }
+      }
     },
     {
       "name": "openrouter",
       "host": "openrouter.ai",
       "path": "/api/v1/chat/completions",
       "model": "anthropic/claude-haiku-4.5",
-      "auth_value": "Bearer $OPENROUTER_API_KEY"
+      "routing": {
+        "mode": "pinned",
+        "provider": "anthropic",
+        "region": null,
+        "fallbacks": false
+      },
+      "auth_value": "Bearer $OPENROUTER_API_KEY",
+      "extra_body": {
+        "provider": {
+          "order": ["anthropic"],
+          "allow_fallbacks": false
+        }
+      }
     },
     {
       "name": "cloudflare",
       "host": "gateway.ai.cloudflare.com",
       "path": "/v1/$CLOUDFLARE_ACCOUNT_ID/$CLOUDFLARE_GATEWAY_ID/compat/chat/completions",
       "model": "anthropic/claude-haiku-4-5",
+      "routing": {
+        "mode": "pinned",
+        "provider": "anthropic",
+        "region": null,
+        "fallbacks": false
+      },
       "auth_header": "cf-aig-authorization",
       "auth_value": "Bearer $CLOUDFLARE_API_KEY"
     },
@@ -41,7 +76,13 @@
       "name": "cloudflare-anthropic",
       "host": "gateway.ai.cloudflare.com",
       "path": "/v1/$CLOUDFLARE_ACCOUNT_ID/$CLOUDFLARE_GATEWAY_ID/anthropic/v1/messages",
-      "model": "claude-haiku-4-5",
+      "model": "claude-haiku-4-5-20251001",
+      "routing": {
+        "mode": "pinned",
+        "provider": "anthropic",
+        "region": null,
+        "fallbacks": false
+      },
       "auth_header": "x-api-key",
       "auth_value": "$ANTHROPIC_API_KEY",
       "extra_headers": {

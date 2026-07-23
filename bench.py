@@ -29,11 +29,13 @@ import ssl
 import sys
 import time
 
-VERSION = "0.1.0"  # bump on every release; the git tag matches (v0.1.0)
+VERSION = "0.2.0"  # bump on every release; the git tag matches (v0.2.0)
 TIMEOUT = 20
 CONTENT_RE = re.compile(rb'"(?:content|text)"\s*:\s*"[^"]')
+MODEL_RE = re.compile(rb'"model"\s*:\s*"([^"]+)"')
 END_MARKERS = (b"data: [DONE]", b'"type":"message_stop"', b"\r\n0\r\n\r\n")
 RECEIPT_HEADERS = ("x-vercel-id", "cf-ray", "x-request-id", "request-id", "x-amzn-requestid")
+PROTECTED_BODY_FIELDS = ("model", "messages", "max_tokens", "stream")
 
 now = time.perf_counter
 
@@ -56,13 +58,38 @@ def open_conn(ip, host):
     return tls_sock, tcp_ms, tls_ms
 
 
-def build_request(gw, cfg):
-    body = json.dumps({
+def _expandvars(obj):
+    """Recursively expand $VARS in every string inside a JSON-ish structure."""
+    if isinstance(obj, str):
+        return os.path.expandvars(obj)
+    if isinstance(obj, dict):
+        return {k: _expandvars(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_expandvars(v) for v in obj]
+    return obj
+
+
+def request_body(gw, cfg):
+    """The JSON request body: the shared, controlled fields plus a gateway's
+    optional extra_body (provider-routing options). extra_body may not override
+    a controlled field, and its $VARS are expanded from the environment."""
+    body = {
         "model": gw["model"],
         "messages": [{"role": "user", "content": cfg["prompt"]}],
         "max_tokens": cfg["max_tokens"],
         "stream": True,
-    }).encode()
+    }
+    extra = gw.get("extra_body", {})
+    clashes = sorted(k for k in extra if k in PROTECTED_BODY_FIELDS)
+    if clashes:
+        raise ValueError(
+            f"{gw['name']}: extra_body may not override {', '.join(clashes)}")
+    body.update(_expandvars(extra))
+    return body
+
+
+def build_request(gw, cfg):
+    body = json.dumps(request_body(gw, cfg)).encode()
     headers = {
         "Host": gw["host"],
         gw.get("auth_header", "Authorization"): os.path.expandvars(gw["auth_value"]),
@@ -81,7 +108,8 @@ def build_request(gw, cfg):
 
 
 def timed_request(sock, request):
-    """Send one request on an open socket. Returns (status, headers, ttfb, ttft)."""
+    """Send one request on an open socket.
+    Returns (status, headers, ttfb, ttft, body_preview, served_model)."""
     t0 = now()
     sock.sendall(request)
     buf = b""
@@ -116,14 +144,27 @@ def timed_request(sock, request):
         if any(m in buf for m in END_MARKERS):
             break
     body_preview = buf[header_end + 4:header_end + 300].decode("utf8", "replace") if header_end >= 0 else ""
-    return status, resp_headers, ttfb, ttft, body_preview
+    m = MODEL_RE.search(buf, header_end) if header_end >= 0 else None
+    served_model = m.group(1).decode("latin1", "replace") if m else None
+    return status, resp_headers, ttfb, ttft, body_preview, served_model
+
+
+def observed_route(served_model):
+    """What the response actually revealed about routing. Records only evidence
+    that is present (the served model); provider and region stay null unless a
+    gateway exposes them. Nothing is inferred. Returns None when there is no
+    evidence (e.g. an error with no body)."""
+    if not served_model:
+        return None
+    return {"provider": None, "model": served_model, "region": None,
+            "evidence": "response_model"}
 
 
 def run_cold(gw, cfg):
     ip, dns_ms = resolve(gw["host"])
     sock, tcp_ms, tls_ms = open_conn(ip, gw["host"])
     try:
-        status, headers, ttfb, ttft, preview = timed_request(sock, build_request(gw, cfg))
+        status, headers, ttfb, ttft, preview, model = timed_request(sock, build_request(gw, cfg))
     finally:
         sock.close()
     if status != 200 or ttft is None:
@@ -133,6 +174,7 @@ def run_cold(gw, cfg):
         "ttfb": ttfb, "ttft": ttft,
         "e2e": dns_ms + tcp_ms + tls_ms + ttft,
         "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers},
+        "observed_route": observed_route(model),
     }
 
 
@@ -152,12 +194,12 @@ def run_warm(gw, cfg):
     sock, _, _ = open_conn(ip, gw["host"])
     try:
         request = build_request(gw, cfg)
-        status, _, _, _, preview = timed_request(sock, request)  # warmup, full read
+        status, _, _, _, preview, _ = timed_request(sock, request)  # warmup, full read
         if status != 200:
             raise RuntimeError(f"warmup HTTP {status}: {preview[:200]}")
         _drain(sock)
         try:
-            status, headers, ttfb, ttft, preview = timed_request(sock, request)
+            status, headers, ttfb, ttft, preview, model = timed_request(sock, request)
         except (BrokenPipeError, ConnectionResetError) as e:
             raise RuntimeError(
                 f"server closed reused connection ({type(e).__name__})") from e
@@ -169,7 +211,8 @@ def run_warm(gw, cfg):
         raise RuntimeError(f"HTTP {status}: {preview[:200]}")
     return {"ttfb": ttfb, "ttft": ttft,
             "conn": {h: headers[h] for h in ("connection", "keep-alive") if h in headers},
-            "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers}}
+            "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers},
+            "observed_route": observed_route(model)}
 
 
 def percentile(vals, q):
@@ -215,6 +258,19 @@ def fmt(v):
     return f"{v:7.1f}" if v is not None else "      —"
 
 
+def _target(gw):
+    """What the run aimed at, for the result file. The path stays templated (its
+    $VARS are not expanded) so account and gateway IDs never land in a result.
+    A gateway that declares no routing is recorded as `dynamic`, not as a pin."""
+    return {
+        "host": gw["host"],
+        "path": gw["path"],
+        "model": gw["model"],
+        "routing": gw.get("routing", {"mode": "dynamic", "provider": None,
+                                      "region": None, "fallbacks": None}),
+    }
+
+
 def build_output(gateways, runs_cold, runs_warm, max_tokens, results):
     """Assemble the serialized result document. Pure (no I/O) so the top-level
     contract can be tested directly. `version` matches the release (and the git
@@ -240,6 +296,7 @@ def build_output(gateways, runs_cold, runs_warm, max_tokens, results):
         },
         "gateways": {
             gw["name"]: {
+                "target": _target(gw),
                 "summary": {
                     "cold": summarize(results[gw["name"]]["cold"], COLD_METRICS),
                     "warm": summarize(results[gw["name"]]["warm"], WARM_METRICS),
@@ -256,6 +313,11 @@ def build_output(gateways, runs_cold, runs_warm, max_tokens, results):
 def main():
     cfg = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "config.json"))
     gateways = cfg["gateways"]
+    try:
+        for gw in gateways:
+            request_body(gw, cfg)  # fail fast on a bad extra_body before any run
+    except ValueError as e:
+        sys.exit(f"config error: {e}")
     runs_cold = cfg.get("runs_cold", 50)
     runs_warm = cfg.get("runs_warm", 50)
     width = max(len(gw["name"]) for gw in gateways)

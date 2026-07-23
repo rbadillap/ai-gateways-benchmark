@@ -5,7 +5,7 @@
   "max_tokens": 16,
   "gateways": [
     {
-      "name": "anthropic-direct",
+      "name": "anthropic",
       "host": "api.anthropic.com",
       "path": "/v1/messages",
       "model": "claude-haiku-4-5",

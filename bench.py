@@ -29,6 +29,7 @@ import ssl
 import sys
 import time
 
+VERSION = "0.1.0"  # bump on every release; the git tag matches (v0.1.0)
 TIMEOUT = 20
 CONTENT_RE = re.compile(rb'"(?:content|text)"\s*:\s*"[^"]')
 END_MARKERS = (b"data: [DONE]", b'"type":"message_stop"', b"\r\n0\r\n\r\n")
@@ -214,6 +215,44 @@ def fmt(v):
     return f"{v:7.1f}" if v is not None else "      —"
 
 
+def build_output(gateways, runs_cold, runs_warm, max_tokens, results):
+    """Assemble the serialized result document. Pure (no I/O) so the top-level
+    contract can be tested directly. `version` matches the release (and the git
+    tag `vX.Y.Z`); call out any format-breaking change in the release notes.
+
+    The raw prompt is deliberately not persisted: the README encourages sharing
+    the result file, and a prompt can carry private text. Redaction rules for
+    any embedded configuration are deferred to the observer-metadata work.
+    """
+    return {
+        "version": VERSION,
+        "configuration": {
+            "runs_cold": runs_cold,
+            "runs_warm": runs_warm,
+            "max_tokens": max_tokens,
+            "timeout_seconds": TIMEOUT,
+            "units": "ms",
+            "statistics": {
+                "percentiles": [50, 90],
+                "percentile_method": "R-7 linear interpolation",
+                "include_iqr": True,
+            },
+        },
+        "gateways": {
+            gw["name"]: {
+                "summary": {
+                    "cold": summarize(results[gw["name"]]["cold"], COLD_METRICS),
+                    "warm": summarize(results[gw["name"]]["warm"], WARM_METRICS),
+                },
+                "cold": results[gw["name"]]["cold"],
+                "warm": results[gw["name"]]["warm"],
+                "errors": results[gw["name"]]["errors"],
+            }
+            for gw in gateways
+        },
+    }
+
+
 def main():
     cfg = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "config.json"))
     gateways = cfg["gateways"]
@@ -242,37 +281,7 @@ def main():
                 results[gw["name"]]["errors"].append(f"warm {i+1}: {e}")
                 print(f"warm {i+1} {gw['name']:<{width}} ERROR: {e}")
 
-    summaries = {
-        gw["name"]: {
-            "cold": summarize(results[gw["name"]]["cold"], COLD_METRICS),
-            "warm": summarize(results[gw["name"]]["warm"], WARM_METRICS),
-        }
-        for gw in gateways
-    }
-    output = {
-        "configuration": {
-            "runs_cold": runs_cold,
-            "runs_warm": runs_warm,
-            "prompt": cfg["prompt"],
-            "max_tokens": cfg["max_tokens"],
-            "timeout_seconds": TIMEOUT,
-            "units": "ms",
-            "statistics": {
-                "percentiles": [50, 90],
-                "percentile_method": "R-7 linear interpolation",
-                "include_iqr": True,
-            },
-        },
-        "gateways": {
-            gw["name"]: {
-                "summary": summaries[gw["name"]],
-                "cold": results[gw["name"]]["cold"],
-                "warm": results[gw["name"]]["warm"],
-                "errors": results[gw["name"]]["errors"],
-            }
-            for gw in gateways
-        },
-    }
+    output = build_output(gateways, runs_cold, runs_warm, cfg["max_tokens"], results)
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = os.path.join(os.path.dirname(os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "config.json")),
@@ -289,8 +298,8 @@ def main():
     print("| Gateway | DNS | TCP | TLS | TTFB | TTFT | Cold e2e TTFT | Warm TTFB | Warm TTFT |")
     print("|---|---|---|---|---|---|---|---|---|")
     for gw in gateways:
-        c = summaries[gw["name"]]["cold"]["metrics_ms"]
-        w = summaries[gw["name"]]["warm"]["metrics_ms"]
+        c = output["gateways"][gw["name"]]["summary"]["cold"]["metrics_ms"]
+        w = output["gateways"][gw["name"]]["summary"]["warm"]["metrics_ms"]
         print(f"| {gw['name']} |{fmt(p50(c['dns']))} |{fmt(p50(c['tcp']))} |{fmt(p50(c['tls']))} "
               f"|{fmt(p50(c['ttfb']))} |{fmt(p50(c['ttft']))} |{fmt(p50(c['e2e']))} "
               f"|{fmt(p50(w['ttfb']))} |{fmt(p50(w['ttft']))} |")

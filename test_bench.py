@@ -7,6 +7,7 @@ No dependencies: the assertions are hand-computed and cross-checked against
 statistics.quantiles(method='inclusive'), which is the same R-7 convention.
 """
 
+import json
 import statistics
 import unittest
 
@@ -82,6 +83,46 @@ class MetricStatsTests(unittest.TestCase):
         summary = bench.summarize(runs, bench.COLD_METRICS)
         self.assertEqual(set(summary["metrics_ms"]), set(bench.COLD_METRICS))
         self.assertEqual(summary["metrics_ms"]["ttft"]["n"], 1)
+
+
+class OutputContractTests(unittest.TestCase):
+    """Locks the serialized top-level shape so an incompatible change is caught
+    (and forces a conscious schema_version bump)."""
+
+    def _results(self):
+        return {
+            "g1": {
+                "cold": [{"dns": 1.0, "tcp": 2.0, "tls": 3.0, "ttfb": 4.0,
+                          "ttft": 5.0, "e2e": 6.0, "receipts": {}}],
+                "warm": [{"ttfb": 4.0, "ttft": 5.0, "conn": {}, "receipts": {}}],
+                "errors": [],
+            }
+        }
+
+    def test_top_level_shape_and_version(self):
+        out = bench.build_output([{"name": "g1"}], 1, 1, 16, self._results())
+        self.assertEqual(set(out), {"version", "configuration", "gateways"})
+        self.assertEqual(out["version"], bench.VERSION)
+        cfg = out["configuration"]
+        self.assertEqual(cfg["units"], "ms")
+        self.assertEqual(cfg["statistics"]["percentile_method"], "R-7 linear interpolation")
+
+    def test_raw_prompt_is_not_persisted(self):
+        out = bench.build_output([{"name": "g1"}], 1, 1, 16, self._results())
+        self.assertNotIn("prompt", out["configuration"])
+        self.assertNotIn("prompt", json.dumps(out))
+
+    def test_gateway_entry_shape(self):
+        out = bench.build_output([{"name": "g1"}], 1, 1, 16, self._results())
+        self.assertEqual(set(out["gateways"]), {"g1"})
+        g = out["gateways"]["g1"]
+        self.assertEqual(set(g), {"summary", "cold", "warm", "errors"})
+        self.assertEqual(set(g["summary"]["cold"]["metrics_ms"]), set(bench.COLD_METRICS))
+        self.assertEqual(set(g["summary"]["warm"]["metrics_ms"]), set(bench.WARM_METRICS))
+
+    def test_output_is_json_serializable(self):
+        out = bench.build_output([{"name": "g1"}], 1, 1, 16, self._results())
+        self.assertEqual(json.loads(json.dumps(out))["version"], bench.VERSION)
 
 
 if __name__ == "__main__":

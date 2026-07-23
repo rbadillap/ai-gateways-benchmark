@@ -12,13 +12,33 @@ set -a; source .env; set +a
 python3 bench.py config.json
 ```
 
+### Setup
+
+Each gateway is called with real credentials, so you need an API key for every
+gateway in your `config.json` (Cloudflare also wants account and gateway IDs).
+Fill them into `.env`. `bench.py` reads the `$VARS` from the environment at
+request time, so no secret has to sit in the config file.
+
+| Variable | Used by |
+|---|---|
+| `ANTHROPIC_API_KEY` | `anthropic`, `cloudflare-anthropic` |
+| `AI_GATEWAY_API_KEY` | `vercel` |
+| `OPENROUTER_API_KEY` | `openrouter` |
+| `CLOUDFLARE_API_KEY`, `CLOUDFLARE_ACCOUNT_ID`, `CLOUDFLARE_GATEWAY_ID` | `cloudflare`, `cloudflare-anthropic` |
+
+Drop any gateway from `config.json` whose keys you don't have.
+
+> [!WARNING]
+> The example runs 50 cold and 50 warm measurements against every gateway:
+> hundreds of billable API calls and a few minutes of wall time. For a quick
+> local check, drop `runs_cold` and `runs_warm` in `config.json` to something
+> small like 5. 50 is just a sample size we picked for a steadier p90, not a
+> magic number; with a few runs the p90 rides on your single slowest request,
+> and past 50 or so the extra runs barely move it.
+
 It prints per-run lines while it works, then a p50 table ready to paste,
 receipt headers per gateway, and dumps raw per-run results to
 `results-<timestamp>.json`:
-
-The example configuration runs 50 cold and 50 warm measurements — the point
-where a p90 stops being pinned to the single worst sample. Lower `runs_cold` /
-`runs_warm` for a quick local check; keep 50 or more for numbers you publish.
 
 ```
 | Gateway         | DNS | TCP | TLS  | TTFB   | TTFT   | Cold e2e TTFT | Warm TTFB | Warm TTFT |
@@ -80,7 +100,7 @@ works without stored keys.
 - A config that proxies one gateway through another measures the whole
   chain, never the outer gateway alone.
 - Each metric reports p50, p90, and IQR (R-7 percentiles) over `n` successful
-  runs. A small `n` still means a noisy p90 — check `n` and the raw JSON for
+  runs. A small `n` still means a noisy p90, so check `n` and the raw JSON for
   the full spread.
 - Summary statistics include successful runs only. Inspect and disclose the
   error count; a row with failed attempts is not comparable without that

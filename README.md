@@ -107,6 +107,10 @@ works without stored keys.
   context.
 - A gateway that dynamically selects an upstream measures that routing
   policy, not isolated gateway overhead.
+- The result records what each run aimed at (`target.routing`: the pinned
+  provider and model) and the model each gateway actually served
+  (`observed_route`). A gateway that echoes only the model alias, not the
+  dated snapshot, shows up there.
 - Keep the config and benchmark commit with the raw JSON. The current result
   file does not contain enough context to reproduce a run by itself.
 

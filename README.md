@@ -12,9 +12,13 @@ set -a; source .env; set +a
 python3 bench.py config.json
 ```
 
-It prints per-run lines while it works, then a medians table ready to
-paste, receipt headers per gateway, and dumps raw per-run results to
+It prints per-run lines while it works, then a p50 table ready to paste,
+receipt headers per gateway, and dumps raw per-run results to
 `results-<timestamp>.json`:
+
+The example configuration runs 50 cold and 50 warm measurements — the point
+where a p90 stops being pinned to the single worst sample. Lower `runs_cold` /
+`runs_warm` for a quick local check; keep 50 or more for numbers you publish.
 
 ```
 | Gateway         | DNS | TCP | TLS  | TTFB   | TTFT   | Cold e2e TTFT | Warm TTFB | Warm TTFT |
@@ -75,8 +79,16 @@ works without stored keys.
 - `cold` means a new connection, not a provider-side cold start.
 - A config that proxies one gateway through another measures the whole
   chain, never the outer gateway alone.
-- Medians of small runs are indicative, not definitive. The raw JSON has
-  the spread.
+- Each metric reports p50, p90, and IQR (R-7 percentiles) over `n` successful
+  runs. A small `n` still means a noisy p90 — check `n` and the raw JSON for
+  the full spread.
+- Summary statistics include successful runs only. Inspect and disclose the
+  error count; a row with failed attempts is not comparable without that
+  context.
+- A gateway that dynamically selects an upstream measures that routing
+  policy, not isolated gateway overhead.
+- Keep the config and benchmark commit with the raw JSON. The current result
+  file does not contain enough context to reproduce a run by itself.
 
 The full measurement doctrine, including baselines, topology naming, and
 how to present results honestly: **[METHODOLOGY.md](METHODOLOGY.md)**.

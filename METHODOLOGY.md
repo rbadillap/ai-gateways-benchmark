@@ -48,10 +48,10 @@ from telling a dishonest story.
 
 ## Reading results honestly
 
-- Medians of small runs are indicative, not definitive. Increase
-  `runs_cold` / `runs_warm` for tighter numbers, and look at the raw JSON
-  for spread. Connection-phase variance is often more informative than the
-  median.
+- p50/p90 from small runs are indicative, not definitive. Increase
+  `runs_cold` / `runs_warm` for tighter tails, and look at the raw JSON
+  for the full spread. Connection-phase variance is often more informative
+  than the p50.
 - Results are a property of your vantage point: region, ISP, transit. The
   same config from another country can invert the table.
 - Results are also a property of the moment. The same gateway can shift

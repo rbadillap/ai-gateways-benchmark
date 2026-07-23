@@ -26,7 +26,6 @@ import os
 import re
 import socket
 import ssl
-import statistics
 import sys
 import time
 
@@ -172,9 +171,43 @@ def run_warm(gw, cfg):
             "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers}}
 
 
-def med(runs, key):
-    vals = [r[key] for r in runs if r.get(key) is not None]
-    return statistics.median(vals) if vals else None
+def percentile(vals, q):
+    """R-7 (linear interpolation) percentile of an ascending list, q in [0, 100].
+
+    Deterministic and identical to the default used by R, NumPy, pandas, and
+    Excel PERCENTILE.INC, i.e. statistics.quantiles(method='inclusive'). Named
+    explicitly in the output so anyone can reproduce a number in their own tool.
+    """
+    if not vals:
+        return None
+    if len(vals) == 1:
+        return vals[0]
+    pos = (q / 100) * (len(vals) - 1)
+    lo = int(pos)
+    if lo + 1 >= len(vals):
+        return vals[-1]
+    return vals[lo] + (pos - lo) * (vals[lo + 1] - vals[lo])
+
+
+def metric_stats(runs, key):
+    """n, p50, p90, and IQR (p75 - p25) over successful runs only (None dropped)."""
+    vals = sorted(r[key] for r in runs if r.get(key) is not None)
+    if not vals:
+        return None
+    return {
+        "n": len(vals),
+        "p50": round(percentile(vals, 50), 2),
+        "p90": round(percentile(vals, 90), 2),
+        "iqr": round(percentile(vals, 75) - percentile(vals, 25), 2),
+    }
+
+
+COLD_METRICS = ("dns", "tcp", "tls", "ttfb", "ttft", "e2e")
+WARM_METRICS = ("ttfb", "ttft")
+
+
+def summarize(runs, metrics):
+    return {"metrics_ms": {k: metric_stats(runs, k) for k in metrics}}
 
 
 def fmt(v):
@@ -184,10 +217,12 @@ def fmt(v):
 def main():
     cfg = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "config.json"))
     gateways = cfg["gateways"]
+    runs_cold = cfg.get("runs_cold", 50)
+    runs_warm = cfg.get("runs_warm", 50)
     width = max(len(gw["name"]) for gw in gateways)
     results = {gw["name"]: {"cold": [], "warm": [], "errors": []} for gw in gateways}
 
-    for i in range(cfg.get("runs_cold", 5)):
+    for i in range(runs_cold):
         for gw in gateways:  # round-robin: fair across time
             try:
                 r = run_cold(gw, cfg)
@@ -197,7 +232,7 @@ def main():
                 results[gw["name"]]["errors"].append(f"cold {i+1}: {e}")
                 print(f"cold {i+1} {gw['name']:<{width}} ERROR: {e}")
 
-    for i in range(cfg.get("runs_warm", 5)):
+    for i in range(runs_warm):
         for gw in gateways:
             try:
                 r = run_warm(gw, cfg)
@@ -207,21 +242,58 @@ def main():
                 results[gw["name"]]["errors"].append(f"warm {i+1}: {e}")
                 print(f"warm {i+1} {gw['name']:<{width}} ERROR: {e}")
 
+    summaries = {
+        gw["name"]: {
+            "cold": summarize(results[gw["name"]]["cold"], COLD_METRICS),
+            "warm": summarize(results[gw["name"]]["warm"], WARM_METRICS),
+        }
+        for gw in gateways
+    }
+    output = {
+        "configuration": {
+            "runs_cold": runs_cold,
+            "runs_warm": runs_warm,
+            "prompt": cfg["prompt"],
+            "max_tokens": cfg["max_tokens"],
+            "timeout_seconds": TIMEOUT,
+            "units": "ms",
+            "statistics": {
+                "percentiles": [50, 90],
+                "percentile_method": "R-7 linear interpolation",
+                "include_iqr": True,
+            },
+        },
+        "gateways": {
+            gw["name"]: {
+                "summary": summaries[gw["name"]],
+                "cold": results[gw["name"]]["cold"],
+                "warm": results[gw["name"]]["warm"],
+                "errors": results[gw["name"]]["errors"],
+            }
+            for gw in gateways
+        },
+    }
+
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = os.path.join(os.path.dirname(os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "config.json")),
                        f"results-{stamp}.json")
     with open(out, "w") as f:
-        json.dump(results, f, indent=2)
+        json.dump(output, f, indent=2)
 
-    print(f"\nMedians in ms, {cfg.get('runs_cold', 5)} cold + {cfg.get('runs_warm', 5)} warm runs, "
-          f"model per gateway as configured, max_tokens={cfg['max_tokens']}\n")
+    def p50(stats):
+        return stats["p50"] if stats else None
+
+    print(f"\np50 (R-7) in ms, {runs_cold} cold + {runs_warm} warm runs, "
+          f"model per gateway as configured, max_tokens={cfg['max_tokens']}. "
+          f"p90 and IQR are in the raw JSON.\n")
     print("| Gateway | DNS | TCP | TLS | TTFB | TTFT | Cold e2e TTFT | Warm TTFB | Warm TTFT |")
     print("|---|---|---|---|---|---|---|---|---|")
     for gw in gateways:
-        c, w = results[gw["name"]]["cold"], results[gw["name"]]["warm"]
-        print(f"| {gw['name']} |{fmt(med(c,'dns'))} |{fmt(med(c,'tcp'))} |{fmt(med(c,'tls'))} "
-              f"|{fmt(med(c,'ttfb'))} |{fmt(med(c,'ttft'))} |{fmt(med(c,'e2e'))} "
-              f"|{fmt(med(w,'ttfb'))} |{fmt(med(w,'ttft'))} |")
+        c = summaries[gw["name"]]["cold"]["metrics_ms"]
+        w = summaries[gw["name"]]["warm"]["metrics_ms"]
+        print(f"| {gw['name']} |{fmt(p50(c['dns']))} |{fmt(p50(c['tcp']))} |{fmt(p50(c['tls']))} "
+              f"|{fmt(p50(c['ttfb']))} |{fmt(p50(c['ttft']))} |{fmt(p50(c['e2e']))} "
+              f"|{fmt(p50(w['ttfb']))} |{fmt(p50(w['ttft']))} |")
     print("\nReceipts (one per gateway):")
     for gw in gateways:
         runs = results[gw["name"]]["cold"]

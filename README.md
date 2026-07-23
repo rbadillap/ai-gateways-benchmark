@@ -66,9 +66,10 @@ cp .env.example .env                 # then add your API keys
 
 `config.json` accepts any OpenAI-compatible chat-completions endpoint, plus
 per-gateway overrides for auth header and extra headers (see the Cloudflare
-example, which shows a path-based gateway with a secondary auth header).
-`$VARS` in `auth_value` and `extra_headers` are expanded from the
-environment.
+example, which shows a path-based gateway with a custom auth header).
+`$VARS` in `path`, `auth_value`, and `extra_headers` are expanded from the
+environment — so account and gateway IDs can live in `.env` rather than the
+config (e.g. `/v1/$CLOUDFLARE_ACCOUNT_ID/$CLOUDFLARE_GATEWAY_ID/...`).
 
 ## Run
 

@@ -74,7 +74,8 @@ def build_request(gw, cfg):
     }
     for k, v in gw.get("extra_headers", {}).items():
         headers[k] = os.path.expandvars(v)
-    head = f"POST {gw['path']} HTTP/1.1\r\n" + "".join(
+    path = os.path.expandvars(gw["path"])
+    head = f"POST {path} HTTP/1.1\r\n" + "".join(
         f"{k}: {v}\r\n" for k, v in headers.items()) + "\r\n"
     return head.encode() + body
 

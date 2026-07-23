@@ -1,111 +1,85 @@
 # ai-gateways-benchmark
-> Imagine you want to measure how fast a courier delivers packages. In your
-test, the courier does not deliver directly. He hands the package to a
-second courier, who runs the rest of the route. The time you record is
-both couriers combined. If you publish that number as the first courier's
-speed, you are blaming him for a route he never ran.
-
-> That is what a chained configuration does: a gateway proxying another
-gateway measures the whole chain, not the outer gateway's own overhead.
-Time each courier delivering directly before you compare them. When you
-publish a chained number, label it as the chain it is.
-
-
-### what is this?
 
 Phase-by-phase latency benchmark for AI gateways, measured from your own
-machine. Raw sockets, zero dependencies — Python 3 stdlib only.
+machine. Raw sockets, zero dependencies, Python 3 stdlib only.
 
-Gateway latency discussions tend to conflate metrics that behave very
-differently. This tool separates them:
+## Quickstart
+
+```sh
+cp config.example.json config.json   # endpoints and models
+cp .env.example .env                 # your API keys
+set -a; source .env; set +a
+python3 bench.py config.json
+```
+
+It prints per-run lines while it works, then a medians table ready to
+paste, receipt headers per gateway, and dumps raw per-run results to
+`results-<timestamp>.json`:
+
+```
+| Gateway         | DNS | TCP | TLS  | TTFB   | TTFT   | Cold e2e TTFT | Warm TTFB | Warm TTFT |
+|-----------------|-----|-----|------|--------|--------|---------------|-----------|-----------|
+| provider-direct | 4.2 | 8.0 | 11.3 |  672.4 |  673.5 |  704.0        |  602.5    |  602.6    |
+| gateway-a       | 3.1 | 9.0 | 17.6 |  800.2 |  800.6 |  848.8        |  580.3    |  580.7    |
+| gateway-b       | 4.1 | 7.0 | 12.0 | 1240.0 | 1240.1 | 1277.3        | 1302.4    | 1303.8    |
+```
+
+## What it measures
+
+```mermaid
+flowchart TB
+    subgraph setup [connection setup, paid on every cold start]
+        DNS --> TCP --> TLS
+    end
+    subgraph request [request phase, cold and warm]
+        SENT[request sent] --> TTFB[first byte] --> TTFT[first token]
+    end
+    TLS --> SENT
+```
 
 | Metric | What it measures |
 |---|---|
 | `dns` | Hostname resolution |
 | `tcp` | Socket connect |
-| `tls` | Full TLS handshake (fresh context per connection — no session resumption) |
+| `tls` | Full TLS handshake (fresh context per connection, no session resumption) |
 | `ttfb` | Request fully sent → first response byte |
 | `ttft` | Request fully sent → first content token in the SSE stream |
-| `cold e2e ttft` | `dns + tcp + tls + ttft` — what a short-lived process pays end to end |
+| `cold e2e ttft` | `dns + tcp + tls + ttft`, what a short-lived process pays end to end |
 | `warm ttfb / ttft` | Second request on an already-open connection (the connection-pool case) |
 
-## Method
+Runs interleave round-robin across gateways to cancel time-of-day drift,
+and request-id headers (`x-vercel-id`, `cf-ray`, …) are captured as
+receipts.
 
-- Same model, same prompt, same `max_tokens`, authenticated streaming POSTs
-  on every gateway — no unauthenticated edge responses counted as data.
-- Cold runs use a fresh TLS context per connection, so every run pays the
-  full handshake.
-- Warm runs complete one throwaway request, then measure a second request on
-  the same socket.
-- Runs interleave round-robin across gateways to cancel time-of-day drift.
-- Request-id headers (`x-vercel-id`, `cf-ray`, …) are captured as receipts.
-
-## Baselines and topology
-
-Two practices keep results honest:
-
-- **Include a provider-direct row** (no gateway at all) whenever you can —
-  the example config ships one. With a baseline in the table, every
-  gateway's numbers can be read as *overhead relative to going direct*,
-  which removes vendor-vs-vendor framing entirely: each gateway competes
-  against the network, not against the row below it.
-- **Name configs after their full path.** A gateway proxying another
-  gateway (`cloudflare-openrouter`) is a different topology than the same
-  gateway fronting a provider directly (`cloudflare-anthropic`), and the
-  results table should say which one was measured. A chained config
-  measures the whole chain — never present it as the outer gateway's own
-  overhead. Prefer each gateway's shortest production configuration; add
-  chained rows only deliberately, clearly labeled.
-- **Bare vendor name = the vendor's canonical configuration.** When a
-  vendor states which configuration they consider representative of their
-  gateway, that config carries the bare name (`cloudflare`); every other
-  topology gets an explicit suffix (`cloudflare-anthropic`). Any vendor is
-  welcome to declare theirs.
-
-## Setup
-
-```sh
-cp config.example.json config.json   # then fill in your endpoints/models
-cp .env.example .env                 # then add your API keys
-```
+## Configuration
 
 `config.json` accepts any OpenAI-compatible chat-completions endpoint, plus
-per-gateway overrides for auth header and extra headers (see the Cloudflare
-example, which shows a path-based gateway with a custom auth header).
-`$VARS` in `path`, `auth_value`, and `extra_headers` are expanded from the
-environment — so account and gateway IDs can live in `.env` rather than the
+per-gateway overrides for the auth header and extra headers. `$VARS` in
+`path`, `auth_value`, and `extra_headers` are expanded from the
+environment, so account and gateway IDs can live in `.env` rather than the
 config (e.g. `/v1/$CLOUDFLARE_ACCOUNT_ID/$CLOUDFLARE_GATEWAY_ID/...`).
 
-Note on the Cloudflare examples: `cloudflare` uses the OpenAI-compatible
-`compat` endpoint, which requires provider keys stored in the gateway
-(BYOK). `cloudflare-anthropic` passes the provider key per request instead,
-so it works without stored keys.
+The example config ships a provider-direct baseline row and both Cloudflare
+shapes: `cloudflare` uses the OpenAI-compatible `compat` endpoint, which
+requires provider keys stored in the gateway (BYOK), while
+`cloudflare-anthropic` passes the provider key per request instead, so it
+works without stored keys.
 
-## Run
+## Read this before publishing numbers
 
-```sh
-set -a; source .env; set +a
-python3 bench.py config.json
-```
+> [!IMPORTANT]
+> Results are a property of your vantage point (region, ISP, transit) and
+> of the moment you measured. They are not a global ranking. The same
+> config from another country, or another day, can invert the table.
 
-Prints per-run lines while it works, then a medians table in markdown,
-receipts, and any per-run errors. Raw per-run results are dumped to
-`results-<timestamp>.json` next to the config.
+- `cold` means a new connection, not a provider-side cold start.
+- A config that proxies one gateway through another measures the whole
+  chain, never the outer gateway alone.
+- Medians of small runs are indicative, not definitive. The raw JSON has
+  the spread.
 
-## Reading the results honestly
-
-- Medians of small runs are indicative, not definitive. Increase
-  `runs_cold` / `runs_warm` for tighter numbers, and look at the raw JSON
-  for spread — connection-phase variance is often more informative than the
-  median.
-- Results are a property of *your* vantage point (region, ISP, transit),
-  not a global ranking. The same config from another country can invert the
-  table.
-- Some gateways route a given model across multiple upstream providers;
-  TTFT then reflects whichever upstream served the run.
-- A gateway configured to proxy through another gateway (double hop)
-  overstates the outer gateway's own overhead. Compare like with like.
-- `cold` here means a new connection, not a provider-side cold start.
+The full measurement doctrine, including baselines, topology naming, and
+how to present results honestly: **[METHODOLOGY.md](METHODOLOGY.md)**.
 
 ## License
 

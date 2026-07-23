@@ -22,7 +22,7 @@ same change argued from method is welcome.
 
 - Bug fixes with a reproduction.
 - New gateway or provider examples, in their shortest production
-  configuration (see "Baselines and topology" in the README). Chained
+  configuration (see [METHODOLOGY.md](METHODOLOGY.md)). Chained
   topologies must be named after their full path.
 - Accuracy improvements: timing precision, protocol correctness, better
   error labeling.

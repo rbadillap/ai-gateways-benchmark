@@ -56,6 +56,11 @@ Two practices keep results honest:
   measures the whole chain — never present it as the outer gateway's own
   overhead. Prefer each gateway's shortest production configuration; add
   chained rows only deliberately, clearly labeled.
+- **Bare vendor name = the vendor's canonical configuration.** When a
+  vendor states which configuration they consider representative of their
+  gateway, that config carries the bare name (`cloudflare`); every other
+  topology gets an explicit suffix (`cloudflare-anthropic`). Any vendor is
+  welcome to declare theirs.
 
 ## Setup
 
@@ -70,6 +75,11 @@ example, which shows a path-based gateway with a custom auth header).
 `$VARS` in `path`, `auth_value`, and `extra_headers` are expanded from the
 environment — so account and gateway IDs can live in `.env` rather than the
 config (e.g. `/v1/$CLOUDFLARE_ACCOUNT_ID/$CLOUDFLARE_GATEWAY_ID/...`).
+
+Note on the Cloudflare examples: `cloudflare` uses the OpenAI-compatible
+`compat` endpoint, which requires provider keys stored in the gateway
+(BYOK). `cloudflare-anthropic` passes the provider key per request instead,
+so it works without stored keys.
 
 ## Run
 

@@ -110,6 +110,9 @@ works without stored keys.
   context.
 - A gateway that dynamically selects an upstream measures that routing
   policy, not isolated gateway overhead.
+- The result records the routing each run pinned (`target.routing`: the
+  provider and the mode), so a controlled row can be told apart from a
+  dynamic one.
 - Keep the config and benchmark commit with the raw JSON. The current result
   file does not contain enough context to reproduce a run by itself.
 

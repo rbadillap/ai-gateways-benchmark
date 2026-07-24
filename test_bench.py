@@ -184,22 +184,5 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(t["routing"]["mode"], "dynamic")
 
 
-class ObservedRouteTests(unittest.TestCase):
-    def test_none_without_evidence(self):
-        self.assertIsNone(bench.observed_route(None))
-        self.assertIsNone(bench.observed_route(""))
-
-    def test_records_served_model_only(self):
-        r = bench.observed_route("claude-haiku-4-5-20251001")
-        self.assertEqual(r, {"provider": None, "model": "claude-haiku-4-5-20251001",
-                             "region": None, "evidence": "response_model"})
-
-    def test_model_regex_matches_anthropic_and_openai_shapes(self):
-        anthropic = b'data: {"type":"message_start","message":{"id":"x","model":"claude-haiku-4-5-20251001"}}'
-        openai = b'data: {"id":"x","object":"chat.completion.chunk","model":"anthropic/claude-haiku-4.5"}'
-        self.assertEqual(bench.MODEL_RE.search(anthropic).group(1), b"claude-haiku-4-5-20251001")
-        self.assertEqual(bench.MODEL_RE.search(openai).group(1), b"anthropic/claude-haiku-4.5")
-
-
 if __name__ == "__main__":
     unittest.main()

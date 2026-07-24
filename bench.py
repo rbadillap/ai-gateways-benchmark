@@ -32,7 +32,6 @@ import time
 VERSION = "0.2.0"  # bump on every release; the git tag matches (v0.2.0)
 TIMEOUT = 20
 CONTENT_RE = re.compile(rb'"(?:content|text)"\s*:\s*"[^"]')
-MODEL_RE = re.compile(rb'"model"\s*:\s*"([^"]+)"')
 END_MARKERS = (b"data: [DONE]", b'"type":"message_stop"', b"\r\n0\r\n\r\n")
 RECEIPT_HEADERS = ("x-vercel-id", "cf-ray", "x-request-id", "request-id", "x-amzn-requestid")
 PROTECTED_BODY_FIELDS = ("model", "messages", "max_tokens", "stream")
@@ -109,7 +108,7 @@ def build_request(gw, cfg):
 
 def timed_request(sock, request):
     """Send one request on an open socket.
-    Returns (status, headers, ttfb, ttft, body_preview, served_model)."""
+    Returns (status, headers, ttfb, ttft, body_preview)."""
     t0 = now()
     sock.sendall(request)
     buf = b""
@@ -144,27 +143,14 @@ def timed_request(sock, request):
         if any(m in buf for m in END_MARKERS):
             break
     body_preview = buf[header_end + 4:header_end + 300].decode("utf8", "replace") if header_end >= 0 else ""
-    m = MODEL_RE.search(buf, header_end) if header_end >= 0 else None
-    served_model = m.group(1).decode("latin1", "replace") if m else None
-    return status, resp_headers, ttfb, ttft, body_preview, served_model
-
-
-def observed_route(served_model):
-    """What the response actually revealed about routing. Records only evidence
-    that is present (the served model); provider and region stay null unless a
-    gateway exposes them. Nothing is inferred. Returns None when there is no
-    evidence (e.g. an error with no body)."""
-    if not served_model:
-        return None
-    return {"provider": None, "model": served_model, "region": None,
-            "evidence": "response_model"}
+    return status, resp_headers, ttfb, ttft, body_preview
 
 
 def run_cold(gw, cfg):
     ip, dns_ms = resolve(gw["host"])
     sock, tcp_ms, tls_ms = open_conn(ip, gw["host"])
     try:
-        status, headers, ttfb, ttft, preview, model = timed_request(sock, build_request(gw, cfg))
+        status, headers, ttfb, ttft, preview = timed_request(sock, build_request(gw, cfg))
     finally:
         sock.close()
     if status != 200 or ttft is None:
@@ -174,7 +160,6 @@ def run_cold(gw, cfg):
         "ttfb": ttfb, "ttft": ttft,
         "e2e": dns_ms + tcp_ms + tls_ms + ttft,
         "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers},
-        "observed_route": observed_route(model),
     }
 
 
@@ -194,12 +179,12 @@ def run_warm(gw, cfg):
     sock, _, _ = open_conn(ip, gw["host"])
     try:
         request = build_request(gw, cfg)
-        status, _, _, _, preview, _ = timed_request(sock, request)  # warmup, full read
+        status, _, _, _, preview = timed_request(sock, request)  # warmup, full read
         if status != 200:
             raise RuntimeError(f"warmup HTTP {status}: {preview[:200]}")
         _drain(sock)
         try:
-            status, headers, ttfb, ttft, preview, model = timed_request(sock, request)
+            status, headers, ttfb, ttft, preview = timed_request(sock, request)
         except (BrokenPipeError, ConnectionResetError) as e:
             raise RuntimeError(
                 f"server closed reused connection ({type(e).__name__})") from e
@@ -211,8 +196,7 @@ def run_warm(gw, cfg):
         raise RuntimeError(f"HTTP {status}: {preview[:200]}")
     return {"ttfb": ttfb, "ttft": ttft,
             "conn": {h: headers[h] for h in ("connection", "keep-alive") if h in headers},
-            "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers},
-            "observed_route": observed_route(model)}
+            "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers}}
 
 
 def percentile(vals, q):

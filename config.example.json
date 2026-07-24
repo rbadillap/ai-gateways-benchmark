@@ -8,7 +8,7 @@
       "name": "anthropic",
       "host": "api.anthropic.com",
       "path": "/v1/messages",
-      "model": "claude-haiku-4-5-20251001",
+      "model": "claude-haiku-4-5",
       "routing": {
         "mode": "direct",
         "provider": "anthropic",
@@ -76,7 +76,7 @@
       "name": "cloudflare-anthropic",
       "host": "gateway.ai.cloudflare.com",
       "path": "/v1/$CLOUDFLARE_ACCOUNT_ID/$CLOUDFLARE_GATEWAY_ID/anthropic/v1/messages",
-      "model": "claude-haiku-4-5-20251001",
+      "model": "claude-haiku-4-5",
       "routing": {
         "mode": "pinned",
         "provider": "anthropic",

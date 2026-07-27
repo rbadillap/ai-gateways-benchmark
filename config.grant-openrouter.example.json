@@ -2,21 +2,58 @@
   "runs_cold": 5,
   "runs_warm": 5,
   "prompt": "Reply with the single word: pong",
-  "max_tokens": 16,
+  "max_completion_tokens": 16,
   "gateways": [
+    {
+      "name": "vercel",
+      "host": "ai-gateway.vercel.sh",
+      "path": "/v1/chat/completions",
+      "model": "anthropic/claude-haiku-4.5",
+      "routing": {
+        "mode": "pinned",
+        "provider": "anthropic",
+        "region": null,
+        "fallbacks": false
+      },
+      "auth_value": "Bearer $AI_GATEWAY_API_KEY",
+      "extra_body": {
+        "provider": {
+          "only": ["anthropic"]
+        }
+      }
+    },
     {
       "name": "openrouter",
       "host": "openrouter.ai",
       "path": "/api/v1/chat/completions",
       "model": "anthropic/claude-haiku-4.5",
-      "auth_value": "Bearer $OPENROUTER_API_KEY"
+      "routing": {
+        "mode": "pinned",
+        "provider": "anthropic",
+        "region": null,
+        "fallbacks": false
+      },
+      "auth_value": "Bearer $OPENROUTER_API_KEY",
+      "extra_body": {
+        "provider": {
+          "order": ["anthropic"],
+          "allow_fallbacks": false
+        }
+      }
     },
     {
       "name": "grant",
       "host": "api.trygrant.com",
       "path": "/v1/chat/completions",
       "model": "anthropic/claude-haiku-4.5",
-      "auth_value": "Bearer $GRANT_API_KEY"
+      "routing": {
+        "mode": "pinned",
+        "provider": "anthropic",
+        "region": null,
+        "fallbacks": false
+      },
+      "auth_value": "Bearer $GRANT_API_KEY",
+      "include_timings": true
     }
   ]
 }

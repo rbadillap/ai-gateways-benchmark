@@ -184,5 +184,109 @@ class TargetTests(unittest.TestCase):
         self.assertEqual(t["routing"]["mode"], "dynamic")
 
 
+class BenchmarkTimingTests(unittest.TestCase):
+    def test_build_request_adds_timings_only_for_opted_in_gateway(self):
+        cfg = {
+            "prompt": "ping",
+            "max_completion_tokens": 16,
+        }
+        base = {
+            "host": "example.com",
+            "path": "/v1/chat/completions",
+            "model": "test/model",
+            "auth_value": "Bearer test",
+        }
+
+        plain = bench.build_request(base, cfg)
+        timed = bench.build_request({**base, "include_timings": True}, cfg)
+
+        plain_body = json.loads(plain.split(b"\r\n\r\n", 1)[1])
+        timed_body = json.loads(timed.split(b"\r\n\r\n", 1)[1])
+        self.assertNotIn("include_timings", plain_body)
+        self.assertIs(timed_body["include_timings"], True)
+
+    def test_extract_timings_reads_final_chat_chunk(self):
+        timings = {
+            "version": 1,
+            "ttft_ms": 90.5,
+            "upstream": {"ttft_ms": 80.25},
+        }
+        event = json.dumps(
+            {
+                "object": "chat.completion.chunk",
+                "choices": [],
+                "usage": {"total_tokens": 10},
+                "timings": timings,
+            }
+        )
+        response = (
+            b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\n\r\n"
+            + f"{len(event) + 8:x}\r\ndata: {event}\n\n\r\n".encode()
+            + b"0\r\n\r\n"
+        )
+
+        header_end = response.find(b"\r\n\r\n")
+        self.assertEqual(bench.extract_timings(response, header_end), timings)
+
+    def test_nested_stats_read_router_sections(self):
+        runs = [
+            {"timings": {"upstream": {"ttft_ms": 80}}},
+            {"timings": {"upstream": {"ttft_ms": 100}}},
+            {"timings": None},
+        ]
+
+        stats = bench.nested_metric_stats(runs, "upstream.ttft_ms")
+        self.assertEqual(stats["n"], 2)
+        self.assertEqual(stats["p50"], 90)
+        self.assertEqual(stats["p90"], 98)
+
+    def test_output_saves_router_timing_summary_and_token_field(self):
+        gateway = {
+            "name": "grant",
+            "host": "api.trygrant.com",
+            "path": "/v1/chat/completions",
+            "model": "test/model",
+        }
+        results = {
+            "grant": {
+                "cold": [
+                    {
+                        "dns": 1,
+                        "tcp": 2,
+                        "tls": 3,
+                        "ttfb": 4,
+                        "ttft": 100,
+                        "e2e": 106,
+                        "timings": {
+                            "ttft_ms": 90,
+                            "upstream": {"ttft_ms": 80},
+                        },
+                        "client_minus_router_ttft": 10,
+                        "receipts": {},
+                    }
+                ],
+                "warm": [],
+                "errors": [],
+            }
+        }
+
+        output = bench.build_output(
+            [gateway],
+            1,
+            0,
+            16,
+            results,
+            "max_completion_tokens",
+        )
+
+        self.assertEqual(output["configuration"]["max_completion_tokens"], 16)
+        router = output["gateways"]["grant"]["summary"]["cold"][
+            "router_timings_ms"
+        ]
+        self.assertEqual(router["ttft"]["p50"], 90)
+        self.assertEqual(router["upstream_ttft"]["p50"], 80)
+        self.assertEqual(router["client_minus_router_ttft"]["p50"], 10)
+
+
 if __name__ == "__main__":
     unittest.main()

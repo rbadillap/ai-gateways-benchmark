@@ -63,7 +63,14 @@
       "host": "api.trygrant.com",
       "path": "/v1/chat/completions",
       "model": "anthropic/claude-haiku-4.5",
-      "auth_value": "Bearer $GRANT_API_KEY"
+      "routing": {
+        "mode": "pinned",
+        "provider": "anthropic",
+        "region": null,
+        "fallbacks": false
+      },
+      "auth_value": "Bearer $GRANT_API_KEY",
+      "include_timings": true
     },
     {
       "name": "cloudflare",

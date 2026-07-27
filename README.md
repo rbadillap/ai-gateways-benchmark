@@ -93,11 +93,36 @@ requires provider keys stored in the gateway (BYOK), while
 `cloudflare-anthropic` passes the provider key per request instead, so it
 works without stored keys.
 
-Use `config.grant-openrouter.example.json` for a smaller Grant and OpenRouter
-comparison. It uses
+Use `config.grant-openrouter.example.json` for a smaller Grant, OpenRouter,
+and Vercel comparison. It uses
 `anthropic/claude-haiku-4.5`. Set `GRANT_API_KEY` to a Grant API key for an
 account with the LLM router enabled. That account must also have an Anthropic
 BYOK key so Grant can send the request to the same model provider.
+
+### Grant router timings
+
+Set `"include_timings": true` on a gateway that supports Grant's timing
+extension. The request then asks for the router timing breakdown. The script
+saves that object with each raw run, prints it on each run line, and adds a
+second p50 table for router time, upstream time, database time, KV time, and
+the gap between router TTFT and client TTFT. The raw summary also has p90 and
+IQR for each router field.
+
+Grant reports these main fields:
+
+| Field | What it measures |
+|---|---|
+| `ttft_ms` | Grant request start to the first generated text, reasoning, or tool-call token |
+| `router_before_upstream_ms` | Grant request start to the first provider call |
+| `upstream.response_headers_ms` | Provider call start to provider response headers |
+| `upstream.ttft_ms` | Provider call start to its first generated token |
+| `router_overhead_ms` | Grant TTFT minus provider wait across all attempts |
+| `database_ms` | Sum of auth, feature flag, catalog, and provider-key database calls |
+| `kv_ms` | Sum of auth KV reads and writes |
+| `upstream.attempts` | Per-provider timings when Grant retries or falls back |
+
+All router fields use the server clock. `client_minus_router_ttft` estimates
+the time after Grant saw the first token but before this script received it.
 
 ## Read this before publishing numbers
 
@@ -122,6 +147,8 @@ BYOK key so Grant can send the request to the same model provider.
   dynamic one.
 - Keep the config and benchmark commit with the raw JSON. The current result
   file does not contain enough context to reproduce a run by itself.
+
+Each timing-enabled raw run keeps the full router timing object.
 
 The full measurement doctrine, including baselines, topology naming, and
 how to present results honestly: **[METHODOLOGY.md](METHODOLOGY.md)**.

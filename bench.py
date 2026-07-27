@@ -34,9 +34,23 @@ TIMEOUT = 20
 CONTENT_RE = re.compile(rb'"(?:content|text)"\s*:\s*"[^"]')
 END_MARKERS = (b"data: [DONE]", b'"type":"message_stop"', b"\r\n0\r\n\r\n")
 RECEIPT_HEADERS = ("x-vercel-id", "cf-ray", "x-request-id", "request-id", "x-amzn-requestid")
-PROTECTED_BODY_FIELDS = ("model", "messages", "max_tokens", "stream")
+PROTECTED_BODY_FIELDS = (
+    "model",
+    "messages",
+    "max_tokens",
+    "max_completion_tokens",
+    "stream",
+    "include_timings",
+)
 
 now = time.perf_counter
+
+
+def token_limit(cfg):
+    for field in ("max_completion_tokens", "max_tokens"):
+        if field in cfg:
+            return field, cfg[field]
+    raise KeyError("config must set max_completion_tokens or max_tokens")
 
 
 def resolve(host):
@@ -72,12 +86,15 @@ def request_body(gw, cfg):
     """The JSON request body: the shared, controlled fields plus a gateway's
     optional extra_body (provider-routing options). extra_body may not override
     a controlled field, and its $VARS are expanded from the environment."""
+    token_field, token_value = token_limit(cfg)
     body = {
         "model": gw["model"],
         "messages": [{"role": "user", "content": cfg["prompt"]}],
-        "max_tokens": cfg["max_tokens"],
+        token_field: token_value,
         "stream": True,
     }
+    if gw.get("include_timings", cfg.get("include_timings", False)):
+        body["include_timings"] = True
     extra = gw.get("extra_body", {})
     clashes = sorted(k for k in extra if k in PROTECTED_BODY_FIELDS)
     if clashes:
@@ -107,8 +124,7 @@ def build_request(gw, cfg):
 
 
 def timed_request(sock, request):
-    """Send one request on an open socket.
-    Returns (status, headers, ttfb, ttft, body_preview)."""
+    """Send one request and return status, headers, latency, and router timings."""
     t0 = now()
     sock.sendall(request)
     buf = b""
@@ -143,24 +159,55 @@ def timed_request(sock, request):
         if any(m in buf for m in END_MARKERS):
             break
     body_preview = buf[header_end + 4:header_end + 300].decode("utf8", "replace") if header_end >= 0 else ""
-    return status, resp_headers, ttfb, ttft, body_preview
+    timings = extract_timings(buf, header_end)
+    return status, resp_headers, ttfb, ttft, body_preview, timings
+
+
+def extract_timings(buf, header_end):
+    """Read the last timing object from a Chat or Responses SSE payload."""
+    if header_end < 0:
+        return None
+    found = None
+    for line in buf[header_end + 4:].splitlines():
+        marker = line.find(b"data: ")
+        if marker < 0:
+            continue
+        raw = line[marker + len(b"data: "):].strip()
+        if not raw.startswith(b"{"):
+            continue
+        try:
+            event = json.loads(raw)
+        except (json.JSONDecodeError, UnicodeDecodeError):
+            continue
+        candidate = event.get("timings") if isinstance(event, dict) else None
+        response = event.get("response") if isinstance(event, dict) else None
+        if candidate is None and isinstance(response, dict):
+            candidate = response.get("timings")
+        if isinstance(candidate, dict):
+            found = candidate
+    return found
 
 
 def run_cold(gw, cfg):
     ip, dns_ms = resolve(gw["host"])
     sock, tcp_ms, tls_ms = open_conn(ip, gw["host"])
     try:
-        status, headers, ttfb, ttft, preview = timed_request(sock, build_request(gw, cfg))
+        status, headers, ttfb, ttft, preview, timings = timed_request(
+            sock, build_request(gw, cfg)
+        )
     finally:
         sock.close()
     if status != 200 or ttft is None:
         raise RuntimeError(f"HTTP {status}: {preview[:200]}")
-    return {
+    result = {
         "ip": ip, "dns": dns_ms, "tcp": tcp_ms, "tls": tls_ms,
         "ttfb": ttfb, "ttft": ttft,
         "e2e": dns_ms + tcp_ms + tls_ms + ttft,
+        "timings": timings,
         "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers},
     }
+    add_client_timing_delta(result)
+    return result
 
 
 def _drain(sock, quiet=0.4):
@@ -179,12 +226,16 @@ def run_warm(gw, cfg):
     sock, _, _ = open_conn(ip, gw["host"])
     try:
         request = build_request(gw, cfg)
-        status, _, _, _, preview = timed_request(sock, request)  # warmup, full read
+        status, _, _, _, preview, _ = timed_request(
+            sock, request
+        )  # warmup, full read
         if status != 200:
             raise RuntimeError(f"warmup HTTP {status}: {preview[:200]}")
         _drain(sock)
         try:
-            status, headers, ttfb, ttft, preview = timed_request(sock, request)
+            status, headers, ttfb, ttft, preview, timings = timed_request(
+                sock, request
+            )
         except (BrokenPipeError, ConnectionResetError) as e:
             raise RuntimeError(
                 f"server closed reused connection ({type(e).__name__})") from e
@@ -194,9 +245,22 @@ def run_warm(gw, cfg):
         raise RuntimeError("server closed reused connection (no bytes on second request)")
     if status != 200 or ttft is None:
         raise RuntimeError(f"HTTP {status}: {preview[:200]}")
-    return {"ttfb": ttfb, "ttft": ttft,
-            "conn": {h: headers[h] for h in ("connection", "keep-alive") if h in headers},
-            "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers}}
+    result = {
+        "ttfb": ttfb,
+        "ttft": ttft,
+        "timings": timings,
+        "conn": {h: headers[h] for h in ("connection", "keep-alive") if h in headers},
+        "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers},
+    }
+    add_client_timing_delta(result)
+    return result
+
+
+def add_client_timing_delta(result):
+    timings = result.get("timings")
+    router_ttft = timings.get("ttft_ms") if isinstance(timings, dict) else None
+    if isinstance(router_ttft, (int, float)) and result.get("ttft") is not None:
+        result["client_minus_router_ttft"] = result["ttft"] - router_ttft
 
 
 def percentile(vals, q):
@@ -219,7 +283,11 @@ def percentile(vals, q):
 
 def metric_stats(runs, key):
     """n, p50, p90, and IQR (p75 - p25) over successful runs only (None dropped)."""
-    vals = sorted(r[key] for r in runs if r.get(key) is not None)
+    return value_stats(r[key] for r in runs if r.get(key) is not None)
+
+
+def value_stats(values):
+    vals = sorted(values)
     if not vals:
         return None
     return {
@@ -235,7 +303,46 @@ WARM_METRICS = ("ttfb", "ttft")
 
 
 def summarize(runs, metrics):
-    return {"metrics_ms": {k: metric_stats(runs, k) for k in metrics}}
+    summary = {"metrics_ms": {k: metric_stats(runs, k) for k in metrics}}
+    router_timings = router_timing_stats(runs)
+    if router_timings:
+        summary["router_timings_ms"] = router_timings
+    return summary
+
+
+ROUTER_TIMING_PATHS = {
+    "ttft": "ttft_ms",
+    "before_upstream": "router_before_upstream_ms",
+    "upstream_headers": "upstream.response_headers_ms",
+    "upstream_ttft": "upstream.ttft_ms",
+    "router_overhead": "router_overhead_ms",
+    "database": "database_ms",
+    "kv": "kv_ms",
+}
+
+
+def nested_metric_stats(runs, path):
+    vals = []
+    for run in runs:
+        value = run.get("timings")
+        for part in path.split("."):
+            value = value.get(part) if isinstance(value, dict) else None
+        if isinstance(value, (int, float)):
+            vals.append(value)
+    return value_stats(vals)
+
+
+def router_timing_stats(runs):
+    if not any(isinstance(run.get("timings"), dict) for run in runs):
+        return None
+    stats = {
+        name: nested_metric_stats(runs, path)
+        for name, path in ROUTER_TIMING_PATHS.items()
+    }
+    stats["client_minus_router_ttft"] = metric_stats(
+        runs, "client_minus_router_ttft"
+    )
+    return stats
 
 
 def fmt(v):
@@ -255,7 +362,14 @@ def _target(gw):
     }
 
 
-def build_output(gateways, runs_cold, runs_warm, max_tokens, results):
+def build_output(
+    gateways,
+    runs_cold,
+    runs_warm,
+    token_limit_value,
+    results,
+    token_limit_field="max_tokens",
+):
     """Assemble the serialized result document. Pure (no I/O) so the top-level
     contract can be tested directly. `version` matches the release (and the git
     tag `vX.Y.Z`); call out any format-breaking change in the release notes.
@@ -269,7 +383,7 @@ def build_output(gateways, runs_cold, runs_warm, max_tokens, results):
         "configuration": {
             "runs_cold": runs_cold,
             "runs_warm": runs_warm,
-            "max_tokens": max_tokens,
+            token_limit_field: token_limit_value,
             "timeout_seconds": TIMEOUT,
             "units": "ms",
             "statistics": {
@@ -294,6 +408,29 @@ def build_output(gateways, runs_cold, runs_warm, max_tokens, results):
     }
 
 
+def timing_suffix(run):
+    timings = run.get("timings")
+    if not isinstance(timings, dict):
+        return ""
+    upstream = timings.get("upstream")
+    if not isinstance(upstream, dict):
+        upstream = {}
+    router_overhead = numeric_value(timings.get("router_overhead_ms"))
+    upstream_ttft = numeric_value(upstream.get("ttft_ms"))
+    database = numeric_value(timings.get("database_ms"))
+    kv = numeric_value(timings.get("kv_ms"))
+    return (
+        f" router={router_overhead:6.1f}ms"
+        f" upstream={upstream_ttft:7.1f}ms"
+        f" db={database:5.1f}ms"
+        f" kv={kv:5.1f}ms"
+    )
+
+
+def numeric_value(value):
+    return value if isinstance(value, (int, float)) else 0
+
+
 def main():
     cfg = json.load(open(sys.argv[1] if len(sys.argv) > 1 else "config.json"))
     gateways = cfg["gateways"]
@@ -312,7 +449,11 @@ def main():
             try:
                 r = run_cold(gw, cfg)
                 results[gw["name"]]["cold"].append(r)
-                print(f"cold {i+1} {gw['name']:<{width}} tls={r['tls']:6.1f}ms ttft={r['ttft']:7.1f}ms e2e={r['e2e']:7.1f}ms")
+                print(
+                    f"cold {i+1} {gw['name']:<{width}} tls={r['tls']:6.1f}ms"
+                    f" ttft={r['ttft']:7.1f}ms e2e={r['e2e']:7.1f}ms"
+                    f"{timing_suffix(r)}"
+                )
             except Exception as e:
                 results[gw["name"]]["errors"].append(f"cold {i+1}: {e}")
                 print(f"cold {i+1} {gw['name']:<{width}} ERROR: {e}")
@@ -322,12 +463,23 @@ def main():
             try:
                 r = run_warm(gw, cfg)
                 results[gw["name"]]["warm"].append(r)
-                print(f"warm {i+1} {gw['name']:<{width}} ttfb={r['ttfb']:7.1f}ms ttft={r['ttft']:7.1f}ms")
+                print(
+                    f"warm {i+1} {gw['name']:<{width}} ttfb={r['ttfb']:7.1f}ms"
+                    f" ttft={r['ttft']:7.1f}ms{timing_suffix(r)}"
+                )
             except Exception as e:
                 results[gw["name"]]["errors"].append(f"warm {i+1}: {e}")
                 print(f"warm {i+1} {gw['name']:<{width}} ERROR: {e}")
 
-    output = build_output(gateways, runs_cold, runs_warm, cfg["max_tokens"], results)
+    token_field, token_value = token_limit(cfg)
+    output = build_output(
+        gateways,
+        runs_cold,
+        runs_warm,
+        token_value,
+        results,
+        token_field,
+    )
 
     stamp = time.strftime("%Y%m%d-%H%M%S")
     out = os.path.join(os.path.dirname(os.path.abspath(sys.argv[1] if len(sys.argv) > 1 else "config.json")),
@@ -339,7 +491,7 @@ def main():
         return stats["p50"] if stats else None
 
     print(f"\np50 (R-7) in ms, {runs_cold} cold + {runs_warm} warm runs, "
-          f"model per gateway as configured, max_tokens={cfg['max_tokens']}. "
+          f"model per gateway as configured, {token_field}={token_value}. "
           f"p90 and IQR are in the raw JSON.\n")
     print("| Gateway | DNS | TCP | TLS | TTFB | TTFT | Cold e2e TTFT | Warm TTFB | Warm TTFT |")
     print("|---|---|---|---|---|---|---|---|---|")
@@ -349,6 +501,37 @@ def main():
         print(f"| {gw['name']} |{fmt(p50(c['dns']))} |{fmt(p50(c['tcp']))} |{fmt(p50(c['tls']))} "
               f"|{fmt(p50(c['ttfb']))} |{fmt(p50(c['ttft']))} |{fmt(p50(c['e2e']))} "
               f"|{fmt(p50(w['ttfb']))} |{fmt(p50(w['ttft']))} |")
+
+    timed_gateways = [
+        gw for gw in gateways
+        if any(
+            isinstance(run.get("timings"), dict)
+            for phase in ("cold", "warm")
+            for run in results[gw["name"]][phase]
+        )
+    ]
+    if timed_gateways:
+        print("\nRouter-reported timing p50 (R-7) in ms:")
+        print("| Gateway | Mode | Router TTFT | Before upstream | Upstream headers | Upstream TTFT | Router overhead | DB | KV | Client minus router TTFT |")
+        print("|---|---|---|---|---|---|---|---|---|---|")
+        for gw in timed_gateways:
+            for phase in ("cold", "warm"):
+                timing_stats = output["gateways"][gw["name"]]["summary"][
+                    phase
+                ].get("router_timings_ms")
+                if not timing_stats:
+                    continue
+                print(
+                    f"| {gw['name']} | {phase} "
+                    f"|{fmt(p50(timing_stats['ttft']))} "
+                    f"|{fmt(p50(timing_stats['before_upstream']))} "
+                    f"|{fmt(p50(timing_stats['upstream_headers']))} "
+                    f"|{fmt(p50(timing_stats['upstream_ttft']))} "
+                    f"|{fmt(p50(timing_stats['router_overhead']))} "
+                    f"|{fmt(p50(timing_stats['database']))} "
+                    f"|{fmt(p50(timing_stats['kv']))} "
+                    f"|{fmt(p50(timing_stats['client_minus_router_ttft']))} |"
+                )
     print("\nReceipts (one per gateway):")
     for gw in gateways:
         runs = results[gw["name"]]["cold"]

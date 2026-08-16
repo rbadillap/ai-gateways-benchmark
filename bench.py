@@ -15,8 +15,11 @@ Warm runs open a connection, run one throwaway request to completion, then
 measure a second request on the same socket (the connection-pool case).
 
 Runs are interleaved round-robin across gateways so no gateway benefits from
-time-of-day drift. Captures request-id headers (x-vercel-id, cf-ray, ...) as
-receipts. Raw results are dumped to a timestamped JSON next to the report.
+time-of-day drift. Every attempt (success or failure) is recorded with its
+outcome and a classified error, so reliability is a first-class result and a
+failure never lowers a latency number. Captures request-id headers (x-vercel-id,
+cf-ray, ...) as receipts. Raw results are dumped to a timestamped JSON next to
+the report.
 
 Usage: python3 bench.py config.json
 """
@@ -29,7 +32,7 @@ import ssl
 import sys
 import time
 
-VERSION = "0.2.0"  # bump on every release; the git tag matches (v0.2.0)
+VERSION = "0.3.0"  # bump on every release; the git tag matches (v0.3.0)
 TIMEOUT = 20
 CONTENT_RE = re.compile(rb'"(?:content|text)"\s*:\s*"[^"]')
 END_MARKERS = (b"data: [DONE]", b'"type":"message_stop"', b"\r\n0\r\n\r\n")
@@ -108,7 +111,7 @@ def build_request(gw, cfg):
 
 def timed_request(sock, request):
     """Send one request on an open socket.
-    Returns (status, headers, ttfb, ttft, body_preview)."""
+    Returns (status, headers, ttfb, ttft, body_preview, timed_out)."""
     t0 = now()
     sock.sendall(request)
     buf = b""
@@ -116,10 +119,12 @@ def timed_request(sock, request):
     status = None
     resp_headers = {}
     header_end = -1
+    timed_out = False
     while True:
         try:
             chunk = sock.recv(65536)
         except socket.timeout:
+            timed_out = True
             break
         if not chunk:
             break
@@ -143,24 +148,61 @@ def timed_request(sock, request):
         if any(m in buf for m in END_MARKERS):
             break
     body_preview = buf[header_end + 4:header_end + 300].decode("utf8", "replace") if header_end >= 0 else ""
-    return status, resp_headers, ttfb, ttft, body_preview
+    return status, resp_headers, ttfb, ttft, body_preview, timed_out
 
 
-def run_cold(gw, cfg):
-    ip, dns_ms = resolve(gw["host"])
-    sock, tcp_ms, tls_ms = open_conn(ip, gw["host"])
+def _errored(rec, category, stage, message):
+    """Mark an attempt record as failed, preserving the original message."""
+    rec["outcome"] = "error"
+    rec["error"] = {"category": category, "stage": stage, "message": str(message)[:300]}
+    return rec
+
+
+def classify(status, ttft, timed_out):
+    """Map a completed (bytes-received) response to 'success' or a failure
+    category: http (non-200), timeout (no complete first token in time), or
+    protocol (200 but the stream carried no content token)."""
+    if status == 200 and ttft is not None:
+        return "success"
+    if status is not None and status != 200:
+        return "http"
+    if timed_out:
+        return "timeout"
+    return "protocol"
+
+
+def run_cold(gw, cfg, run):
+    """One cold attempt. Always returns a record (never raises): on failure it
+    keeps the timings captured so far and classifies the stage that broke."""
+    rec = {"run": run, "outcome": "success", "http_status": None, "ip": None,
+           "timings_ms": {}, "receipts": {}, "error": None}
+    t = rec["timings_ms"]
     try:
-        status, headers, ttfb, ttft, preview = timed_request(sock, build_request(gw, cfg))
+        rec["ip"], t["dns"] = resolve(gw["host"])
+    except Exception as e:
+        return _errored(rec, "dns", "resolve", e)
+    try:
+        sock, t["tcp"], t["tls"] = open_conn(rec["ip"], gw["host"])
+    except ssl.SSLError as e:
+        return _errored(rec, "tls", "handshake", e)
+    except Exception as e:
+        return _errored(rec, "tcp", "connect", e)
+    try:
+        status, headers, ttfb, ttft, preview, timed_out = timed_request(sock, build_request(gw, cfg))
+    except Exception as e:
+        return _errored(rec, "unknown", "response", e)
     finally:
         sock.close()
-    if status != 200 or ttft is None:
-        raise RuntimeError(f"HTTP {status}: {preview[:200]}")
-    return {
-        "ip": ip, "dns": dns_ms, "tcp": tcp_ms, "tls": tls_ms,
-        "ttfb": ttfb, "ttft": ttft,
-        "e2e": dns_ms + tcp_ms + tls_ms + ttft,
-        "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers},
-    }
+    rec["http_status"] = status
+    rec["receipts"] = {h: headers[h] for h in RECEIPT_HEADERS if h in headers}
+    if ttfb is not None:
+        t["ttfb"] = ttfb
+    outcome = classify(status, ttft, timed_out)
+    if outcome != "success":
+        return _errored(rec, outcome, "response", f"HTTP {status}: {preview[:200]}")
+    t["ttft"] = ttft
+    t["e2e"] = t["dns"] + t["tcp"] + t["tls"] + ttft
+    return rec
 
 
 def _drain(sock, quiet=0.4):
@@ -174,29 +216,48 @@ def _drain(sock, quiet=0.4):
     sock.settimeout(TIMEOUT)
 
 
-def run_warm(gw, cfg):
-    ip, _ = resolve(gw["host"])
-    sock, _, _ = open_conn(ip, gw["host"])
+def run_warm(gw, cfg, run):
+    """One warm attempt: a throwaway request, then a measured one on the same
+    socket. Always returns a record; a server that drops the reused connection
+    is recorded as a connection_reuse failure, which is data about the endpoint."""
+    rec = {"run": run, "outcome": "success", "http_status": None,
+           "timings_ms": {}, "connection": {}, "receipts": {}, "error": None}
+    t = rec["timings_ms"]
+    try:
+        ip, _ = resolve(gw["host"])
+    except Exception as e:
+        return _errored(rec, "dns", "resolve", e)
+    try:
+        sock, _, _ = open_conn(ip, gw["host"])
+    except ssl.SSLError as e:
+        return _errored(rec, "tls", "handshake", e)
+    except Exception as e:
+        return _errored(rec, "tcp", "connect", e)
     try:
         request = build_request(gw, cfg)
-        status, _, _, _, preview = timed_request(sock, request)  # warmup, full read
+        status, _, _, _, preview, _ = timed_request(sock, request)  # warmup, full read
         if status != 200:
-            raise RuntimeError(f"warmup HTTP {status}: {preview[:200]}")
+            return _errored(rec, "http", "warmup", f"warmup HTTP {status}: {preview[:200]}")
         _drain(sock)
-        try:
-            status, headers, ttfb, ttft, preview = timed_request(sock, request)
-        except (BrokenPipeError, ConnectionResetError) as e:
-            raise RuntimeError(
-                f"server closed reused connection ({type(e).__name__})") from e
+        status, headers, ttfb, ttft, preview, timed_out = timed_request(sock, request)
+    except (BrokenPipeError, ConnectionResetError) as e:
+        return _errored(rec, "connection_reuse", "reuse",
+                        f"server closed reused connection ({type(e).__name__})")
+    except Exception as e:
+        return _errored(rec, "unknown", "response", e)
     finally:
         sock.close()
+    rec["http_status"] = status
+    rec["receipts"] = {h: headers[h] for h in RECEIPT_HEADERS if h in headers}
+    rec["connection"] = {h: headers[h] for h in ("connection", "keep-alive") if h in headers}
     if ttfb is None:
-        raise RuntimeError("server closed reused connection (no bytes on second request)")
-    if status != 200 or ttft is None:
-        raise RuntimeError(f"HTTP {status}: {preview[:200]}")
-    return {"ttfb": ttfb, "ttft": ttft,
-            "conn": {h: headers[h] for h in ("connection", "keep-alive") if h in headers},
-            "receipts": {h: headers[h] for h in RECEIPT_HEADERS if h in headers}}
+        return _errored(rec, "connection_reuse", "reuse", "no bytes on reused connection")
+    t["ttfb"] = ttfb
+    outcome = classify(status, ttft, timed_out)
+    if outcome != "success":
+        return _errored(rec, outcome, "response", f"HTTP {status}: {preview[:200]}")
+    t["ttft"] = ttft
+    return rec
 
 
 def percentile(vals, q):
@@ -217,9 +278,12 @@ def percentile(vals, q):
     return vals[lo] + (pos - lo) * (vals[lo + 1] - vals[lo])
 
 
-def metric_stats(runs, key):
-    """n, p50, p90, and IQR (p75 - p25) over successful runs only (None dropped)."""
-    vals = sorted(r[key] for r in runs if r.get(key) is not None)
+def metric_stats(records, key):
+    """n, p50, p90, and IQR (p75 - p25) over successful attempts only, read from
+    each record's timings_ms. A failed attempt is excluded even if it captured a
+    partial timing (e.g. a fast 429's ttfb), so a failure cannot lower a number."""
+    vals = sorted(r["timings_ms"][key] for r in records
+                  if r["outcome"] == "success" and key in r["timings_ms"])
     if not vals:
         return None
     return {
@@ -234,8 +298,27 @@ COLD_METRICS = ("dns", "tcp", "tls", "ttfb", "ttft", "e2e")
 WARM_METRICS = ("ttfb", "ttft")
 
 
-def summarize(runs, metrics):
-    return {"metrics_ms": {k: metric_stats(runs, k) for k in metrics}}
+def reliability(records):
+    """attempted / succeeded / failed / success_rate and a per-category error
+    count over every attempt (success and failure alike)."""
+    succeeded = sum(1 for r in records if r["outcome"] == "success")
+    by_category = {}
+    for r in records:
+        if r["outcome"] == "error":
+            c = r["error"]["category"]
+            by_category[c] = by_category.get(c, 0) + 1
+    attempted = len(records)
+    return {
+        "attempted": attempted,
+        "succeeded": succeeded,
+        "failed": attempted - succeeded,
+        "success_rate": round(succeeded / attempted, 3) if attempted else None,
+        "errors_by_category": by_category,
+    }
+
+
+def summarize(records, metrics):
+    return {**reliability(records), "metrics_ms": {k: metric_stats(records, k) for k in metrics}}
 
 
 def fmt(v):
@@ -287,7 +370,6 @@ def build_output(gateways, runs_cold, runs_warm, max_tokens, results):
                 },
                 "cold": results[gw["name"]]["cold"],
                 "warm": results[gw["name"]]["warm"],
-                "errors": results[gw["name"]]["errors"],
             }
             for gw in gateways
         },
@@ -305,27 +387,27 @@ def main():
     runs_cold = cfg.get("runs_cold", 50)
     runs_warm = cfg.get("runs_warm", 50)
     width = max(len(gw["name"]) for gw in gateways)
-    results = {gw["name"]: {"cold": [], "warm": [], "errors": []} for gw in gateways}
+    results = {gw["name"]: {"cold": [], "warm": []} for gw in gateways}
 
     for i in range(runs_cold):
         for gw in gateways:  # round-robin: fair across time
-            try:
-                r = run_cold(gw, cfg)
-                results[gw["name"]]["cold"].append(r)
-                print(f"cold {i+1} {gw['name']:<{width}} tls={r['tls']:6.1f}ms ttft={r['ttft']:7.1f}ms e2e={r['e2e']:7.1f}ms")
-            except Exception as e:
-                results[gw["name"]]["errors"].append(f"cold {i+1}: {e}")
-                print(f"cold {i+1} {gw['name']:<{width}} ERROR: {e}")
+            r = run_cold(gw, cfg, i + 1)
+            results[gw["name"]]["cold"].append(r)
+            t = r["timings_ms"]
+            if r["outcome"] == "success":
+                print(f"cold {i+1} {gw['name']:<{width}} tls={t['tls']:6.1f}ms ttft={t['ttft']:7.1f}ms e2e={t['e2e']:7.1f}ms")
+            else:
+                print(f"cold {i+1} {gw['name']:<{width}} ERROR [{r['error']['category']}] {r['error']['message'][:70]}")
 
     for i in range(runs_warm):
         for gw in gateways:
-            try:
-                r = run_warm(gw, cfg)
-                results[gw["name"]]["warm"].append(r)
-                print(f"warm {i+1} {gw['name']:<{width}} ttfb={r['ttfb']:7.1f}ms ttft={r['ttft']:7.1f}ms")
-            except Exception as e:
-                results[gw["name"]]["errors"].append(f"warm {i+1}: {e}")
-                print(f"warm {i+1} {gw['name']:<{width}} ERROR: {e}")
+            r = run_warm(gw, cfg, i + 1)
+            results[gw["name"]]["warm"].append(r)
+            t = r["timings_ms"]
+            if r["outcome"] == "success":
+                print(f"warm {i+1} {gw['name']:<{width}} ttfb={t['ttfb']:7.1f}ms ttft={t['ttft']:7.1f}ms")
+            else:
+                print(f"warm {i+1} {gw['name']:<{width}} ERROR [{r['error']['category']}] {r['error']['message'][:70]}")
 
     output = build_output(gateways, runs_cold, runs_warm, cfg["max_tokens"], results)
 
@@ -340,24 +422,28 @@ def main():
 
     print(f"\np50 (R-7) in ms, {runs_cold} cold + {runs_warm} warm runs, "
           f"model per gateway as configured, max_tokens={cfg['max_tokens']}. "
-          f"p90 and IQR are in the raw JSON.\n")
-    print("| Gateway | DNS | TCP | TLS | TTFB | TTFT | Cold e2e TTFT | Warm TTFB | Warm TTFT |")
-    print("|---|---|---|---|---|---|---|---|---|")
+          f"'ok' is succeeded/attempted; p90 and IQR are in the raw JSON.\n")
+    print("| Gateway | cold ok | warm ok | DNS | TCP | TLS | TTFB | TTFT | Cold e2e TTFT | Warm TTFB | Warm TTFT |")
+    print("|---|---|---|---|---|---|---|---|---|---|---|")
     for gw in gateways:
-        c = output["gateways"][gw["name"]]["summary"]["cold"]["metrics_ms"]
-        w = output["gateways"][gw["name"]]["summary"]["warm"]["metrics_ms"]
-        print(f"| {gw['name']} |{fmt(p50(c['dns']))} |{fmt(p50(c['tcp']))} |{fmt(p50(c['tls']))} "
+        s = output["gateways"][gw["name"]]["summary"]
+        c, w = s["cold"]["metrics_ms"], s["warm"]["metrics_ms"]
+        c_ok = f"{s['cold']['succeeded']}/{s['cold']['attempted']}"
+        w_ok = f"{s['warm']['succeeded']}/{s['warm']['attempted']}"
+        print(f"| {gw['name']} | {c_ok} | {w_ok} |{fmt(p50(c['dns']))} |{fmt(p50(c['tcp']))} |{fmt(p50(c['tls']))} "
               f"|{fmt(p50(c['ttfb']))} |{fmt(p50(c['ttft']))} |{fmt(p50(c['e2e']))} "
               f"|{fmt(p50(w['ttfb']))} |{fmt(p50(w['ttft']))} |")
     print("\nReceipts (one per gateway):")
     for gw in gateways:
-        runs = results[gw["name"]]["cold"]
-        if runs and runs[0]["receipts"]:
-            print(f"  {gw['name']}: {runs[0]['receipts']}")
+        for r in results[gw["name"]]["cold"]:
+            if r["receipts"]:
+                print(f"  {gw['name']}: {r['receipts']}")
+                break
     for gw in gateways:
-        errs = results[gw["name"]]["errors"]
-        if errs:
-            print(f"\n{gw['name']} errors: {errs}")
+        s = output["gateways"][gw["name"]]["summary"]
+        fails = {ph: s[ph]["errors_by_category"] for ph in ("cold", "warm") if s[ph]["failed"]}
+        if fails:
+            print(f"\n{gw['name']} failures: {fails}")
     print(f"\nRaw results: {out}")
 
 

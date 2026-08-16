@@ -105,9 +105,10 @@ works without stored keys.
 - Each metric reports p50, p90, and IQR (R-7 percentiles) over `n` successful
   runs. A small `n` still means a noisy p90, so check `n` and the raw JSON for
   the full spread.
-- Summary statistics include successful runs only. Inspect and disclose the
-  error count; a row with failed attempts is not comparable without that
-  context.
+- Statistics cover successful attempts only, but every attempt is recorded:
+  each phase reports `succeeded/attempted`, a `success_rate`, and
+  `errors_by_category`. A row with failed attempts is not comparable to a clean
+  one without that context.
 - A gateway that dynamically selects an upstream measures that routing
   policy, not isolated gateway overhead.
 - The result records the routing each run pinned (`target.routing`: the
